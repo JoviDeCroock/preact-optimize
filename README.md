@@ -210,6 +210,25 @@ At runtime a text slot holding a vnode, an array or other object renders the ori
 
 The remaining renders are child components receiving new props and initial mounts.
 
+From `pnpm bench:browser` (Chrome, minified production bundles, median of 20 runs, ratio to the untransformed build; lower is better):
+
+| Benchmark                      | none     | default | + `hoistComponents` | + `hooks` | + `blocks` |
+| ------------------------------ | -------- | ------- | ------------------- | --------- | ---------- |
+| create 1,000 rows              | 23.95 ms | 1.00    | 0.99                | 1.06      | 0.92       |
+| update every 10th row          | 7.45 ms  | 0.99    | 0.97                | 1.17      | 0.85       |
+| select a row                   | 1.70 ms  | 0.94    | 0.94                | 0.32      | 0.18       |
+| swap two rows                  | 5.20 ms  | 1.00    | 0.95                | 1.22      | 0.74       |
+| remove a row                   | 4.90 ms  | 0.94    | 0.96                | 1.24      | 0.69       |
+| clear 1,000 rows               | 3.55 ms  | 1.01    | 0.90                | 1.11      | 0.85       |
+| 100 signal counter writes      | 4.50 ms  | 0.31    | 0.31                | 0.31      | 0.31       |
+| 100 keystrokes (`useState`)    | 4.70 ms  | 1.02    | 1.03                | 0.49      | 0.47       |
+| 50 parent re-renders           | 1.70 ms  | 1.00    | 0.65                | 0.47      | 0.41       |
+| geometric mean (13 benchmarks) |          | 0.83    | 0.80                | 0.63      | 0.50       |
+
+`hooks` without `blocks` makes list updates slower: a hole per row (`selected === row.id`) costs more on every re-render of the list than it saves on `select`. `blocks` removes that cost.
+
+In the [js-framework-benchmark](https://github.com/krausest/js-framework-benchmark) (keyed, `{ hooks, hoistComponents, blocks }`, all five measured in one run), the CPU geometric mean relative to vanilla JS is 1.35 for preact-optimize, against 1.66 for the same Preact hooks app untransformed, 1.15 for Solid 2 and 1.06 for Vue Vapor. Most of the remaining gap is in updates that touch a few rows (update every 10th, select): the list still re-renders every row's block.
+
 ## Semantics and deviations
 
 - **Errors** thrown when a hole re-evaluates after a signal write surface from that write (as with any `@preact/signals` binding), not from the nearest error boundary.
