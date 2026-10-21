@@ -6,6 +6,8 @@ export interface ModuleBinding {
 }
 export interface ModuleScope {
 	bindings: Map<string, ModuleBinding>;
+	written: Set<string>;
+	mutated: Set<string>;
 }
 export interface StaticOptions {
 	hoistComponents: boolean;
@@ -16,14 +18,8 @@ export interface Wrap {
 	node: any;
 	parent: any;
 	key: string;
-	/**
-	 * What the scope reads from outside itself, so its computed can be reused
-	 * while they stay the same: a converted binding's signal, a name, or a
-	 * property of a name (`prop`) when the scope only reads its properties.
-	 * `null` when it reads something else (`this`, impure globals, a ref's
-	 * `.current`, component elements without `hoistComponents`).
-	 */
-	deps: { name: string; prop?: string; binding?: Binding }[] | null;
+	/** Rendered as a child, where a computed renders through signals' text binding. */
+	text: boolean;
 }
 export interface Reference {
 	node: any;

@@ -96,7 +96,7 @@ describe('syntax', () => {
 				return <Box label="x"><span>{count.value! + items.length}</span><hr /></Box>;
 			}`;
 		const out = await rolldownTransform(code, 'entry.tsx');
-		assert.match(out.code, /\$hole\(\(\) => \(count\.value! \+ items\.length\), \[count, items\.length\], _k\[0\]\)/);
+		assert.match(out.code, /\$text\(\(\) => \(count\.value! \+ items\.length\)\)/);
 		assert.match(out.code, /<hr \/>/);
 		assert.match(out.code, /\$static\(<hr \/>\)/);
 
@@ -108,7 +108,7 @@ describe('syntax', () => {
 			parserOpts: { plugins: ['jsx'] },
 			plugins: [babelPlugin]
 		});
-		assert.match(babel.code, /_\$hole\(\(\) => count\.value!? \+ items\.length, \[count, items\.length\], _k\[0\]\)/);
+		assert.match(babel.code, /_\$text\(\(\) => count\.value!? \+ items\.length\)/);
 		assert.match(babel.code, /_\$static\(<hr \/>\)/);
 	});
 
@@ -207,7 +207,7 @@ describe('syntax', () => {
 		for (const via of ['babel', 'rolldown']) {
 			const { code: out } = await load(code, via);
 			// The hoist sits inside the hole even though both start at `<b>`.
-			assert.match(out, /\$hole\(\(\) => \(+_h1? \|\|/, via);
+			assert.match(out, /\$text\(\(\) => \(+_h1? \|\|/, via);
 		}
 	});
 

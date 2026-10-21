@@ -1,7 +1,7 @@
 import { options } from 'preact';
 import { jsx } from 'preact/jsx-runtime';
 import { Signal, effect, signal, untracked } from '@preact/signals';
-import { $hole } from './signals.js';
+import { $hole, $text } from './signals.js';
 
 /**
  * Blocks: host-only JSX compiled to a DOM template.
@@ -56,12 +56,20 @@ export function $template(fn, reactive) {
 }
 
 /**
- * Props Preact sets as DOM properties that a clone wouldn't carry: properties
- * that don't reflect to attributes, and listeners (Preact attaches even a
- * string). Static ones become slots with a fixed value.
+ * Whether a clone of `el` carries static prop `name` as Preact set it: false
+ * for listeners (Preact attaches even a string), for `value` and `checked`
+ * (Preact writes them back over user input on every render) and for
+ * properties that don't reflect to an attribute (`volume`, ...). Those
+ * become slots with a fixed value, written to every instance.
+ * @param {Element} el @param {string} name
  */
-const PROPERTY_ONLY =
-	/^(?:value|checked|selected|defaultValue|defaultChecked|muted|indeterminate|innerHTML|textContent|innerText|srcObject|on.*)$/;
+function carried(el, name) {
+	if ((name[0] == 'o' && name[1] == 'n') || name == 'value' || name == 'checked') return false;
+	if (!(name in el)) return true;
+	const a = /** @type {any} */ (el)[name];
+	const b = /** @type {any} */ (el.cloneNode(false))[name];
+	return a === b || (a !== a && b !== b);
+}
 
 /** Slot markers, created once and reused by every template. */
 const markers = [];
@@ -121,7 +129,7 @@ export function $block(values, key) {
 function fallback(/** @type {Template} */ t, /** @type {any[]} */ values, /** @type {any} */ key) {
 	const s = [];
 	for (let i = 1; i < values.length; i++) {
-		s.push(t.reactive[i - 1] ? $hole(values[i]) : values[i]);
+		s.push(t.reactive[i - 1] ? (t.text.includes(i - 1) ? $text : $hole)(values[i]) : values[i]);
 	}
 	const vnode = t.fn(s);
 	vnode.key = key;
@@ -148,17 +156,22 @@ function build(t, doc, namespace) {
 	const props = [];
 
 	/**
-	 * @param {any} props
+	 * @param {any} given
 	 * @param {Element} el
 	 * @param {number[]} path
 	 */
-	const applyProps = (props, el, path) => {
-		for (const name in props) {
+	const applyProps = (given, el, path) => {
+		for (const name in given) {
 			if (name === 'children') continue;
-			const slot = slotOf(props[name]);
-			if (slot >= 0) slots[slot] = { path, name };
-			else if (PROPERTY_ONLY.test(name)) fixed.push({ path, name, value: props[name] });
-			else setProp(el, name, props[name]);
+			const value = given[name];
+			const slot = slotOf(value);
+			if (slot >= 0) {
+				slots[slot] = { path, name };
+				continue;
+			}
+			if (name[0] != 'o' || name[1] != 'n') setProp(el, name, value);
+			if (!carried(el, name)) fixed.push({ path, name, value });
+			else if (!path.length) props.push([name, value]);
 		}
 	};
 
@@ -192,10 +205,6 @@ function build(t, doc, namespace) {
 
 	const scratch = doc.createElementNS(namespace, root.type);
 	applyProps(root.props, scratch, []);
-	for (const name in root.props) {
-		const value = root.props[name];
-		if (name !== 'children' && slotOf(value) < 0 && !PROPERTY_ONLY.test(name)) props.push([name, value]);
-	}
 	for (const attr of Array.from(scratch.attributes)) attrs.push([attr.name, attr.value]);
 	append(root.props.children, content, []);
 	slots.push(...fixed);
@@ -244,11 +253,17 @@ function mount(dom, t) {
 	return (dom.__pb = { t, b, nodes, old: [], input: null, dispose: null });
 }
 
-/** Stop a block's effect. Enough on unmount: its DOM is going away. */
+/**
+ * Stop a block's effect and its listeners, as Preact's unmount drops an
+ * element's listeners. Enough on unmount: its DOM is going away.
+ */
 function dispose(/** @type {Element & { __pb?: Instance }} */ dom) {
 	const inst = /** @type {Instance} */ (dom.__pb);
 	dom.__pb = undefined;
 	if (inst.dispose) inst.dispose();
+	inst.b.slots.forEach(({ name }, i) => {
+		if (name && name[0] == 'o' && name[1] == 'n') /** @type {any} */ (inst.nodes[i]).__pl = undefined;
+	});
 	return inst;
 }
 
@@ -276,15 +291,24 @@ function write(inst, i, value) {
 	const old = inst.old[i];
 	const { name } = inst.b.slots[i];
 	const node = /** @type {any} */ (inst.nodes[i]);
-	if (name == 'value' || name == 'checked') {
-		// Like Preact, compare against the live DOM state.
-		if (value !== undefined && value !== node[name]) setProp(node, name, value, old);
+	if (name == 'value' && node.localName == 'progress' && value == null) {
+		node.removeAttribute(name);
+	} else if (name == 'value') {
+		// Like Preact, compare against the live DOM state, skip null and
+		// undefined, and always write a progress bar's 0 (indeterminate
+		// otherwise).
+		if (value != undefined && (value !== node.value || (node.localName == 'progress' && !value))) {
+			setProp(node, name, value, old);
+		}
+	} else if (name == 'checked') {
+		if (value != undefined && value != node.checked) setProp(node, name, value, old);
 	} else if (value === old) {
 		return;
 	} else if (name) {
 		setProp(node, name, value, old);
 	} else {
-		node.data = value == null || typeof value == 'boolean' ? '' : value;
+		// Preact renders nothing for these, functions included.
+		node.data = value == null || typeof value == 'boolean' || typeof value == 'function' ? '' : value;
 	}
 	inst.old[i] = value;
 }
@@ -333,28 +357,64 @@ function patch(dom, values) {
 		if (t.reactive[i] || values[i + 1] instanceof Signal) {
 			const self = inst;
 			const input = (inst.input = signal(values));
-			inst.dispose = effect(() => apply(self, input.value));
+			try {
+				inst.dispose = effect(() => apply(self, input.value));
+			} catch (e) {
+				// The effect is gone; let the next render start a new one.
+				inst.input = null;
+				throw e;
+			}
 			return;
 		}
 	}
 	apply(inst, values);
 }
 
-const HAS_DOM = typeof Element != 'undefined';
-if (HAS_DOM) {
-	Object.defineProperty(Element.prototype, '__pob', {
+/** @param {any} proto `Element.prototype` of a realm */
+function install(proto) {
+	Object.defineProperty(proto, '__pob', {
 		configurable: true,
 		set(/** @type {any} */ payload) {
-			if (typeof payload == 'function') patch(this, payload());
-			else reset(this);
+			try {
+				if (typeof payload == 'function') patch(this, payload());
+				else reset(this);
+			} catch (e) {
+				// Preact's `setProperty` swallows errors; rethrown from `diffed`.
+				this.__pe = [e];
+			}
 		}
 	});
 }
 
-// `@preact/signals`, imported above, has installed its own hook already.
+const HAS_DOM = typeof Element != 'undefined';
+if (HAS_DOM) install(Element.prototype);
+
+// `@preact/signals`, imported above, has installed its own hooks already.
+const prevDiffed = /** @type {(vnode: any) => void} */ (options.diffed);
+options.diffed = vnode => {
+	const dom = vnode.__e;
+	const payload = typeof vnode.type == 'string' && vnode.props.__pob;
+	if (payload && dom) {
+		if (!('__pob' in dom)) {
+			// An element from another document (an iframe, a popup), which
+			// Preact skipped the function-valued prop on.
+			install(dom.ownerDocument.defaultView.Element.prototype);
+			dom.__pob = payload;
+		}
+		const error = dom.__pe;
+		if (error) {
+			// Thrown outside the element's diff, so the nearest error boundary
+			// catches it, as it would a throw from the JSX it replaced.
+			dom.__pe = undefined;
+			throw error[0];
+		}
+	}
+	prevDiffed(vnode);
+};
+
 const prevUnmount = /** @type {(vnode: any) => void} */ (options.unmount);
 options.unmount = vnode => {
-	if (typeof vnode.type == 'string' && vnode.props.__pob) dispose(/** @type {any} */ (vnode).__e);
+	if (typeof vnode.type == 'string' && vnode.props.__pob && vnode.__e.__pb) dispose(vnode.__e);
 	prevUnmount(vnode);
 };
 
@@ -448,6 +508,7 @@ function createProxy(name) {
 		// like Preact does.
 		if (e.__poc == null) e.__poc = clock++;
 		else if (e.__poc < this.__pa[name]) return;
-		return this.__pl[name](options.event ? options.event(e) : e);
+		const fn = this.__pl && this.__pl[name];
+		if (fn) return fn(options.event ? options.event(e) : e);
 	};
 }

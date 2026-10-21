@@ -69,11 +69,6 @@ export default function preactOptimize(options = {}) {
 		const templatePrefix = uid('t');
 		for (let i = 1; i <= plan.blocks.length; i++) taken.add(templatePrefix + i);
 
-		// One key per reusable scope, so its computed survives re-renders.
-		const reusable = plan.wraps.filter(wrap => wrap.deps);
-		const sites = reusable.length ? uid('k') : '';
-		const sitesInit = sites && `var ${sites} = ${helper('signals', '$sites')}(${reusable.length});\n`;
-
 		/** @type {Map<import('preact-optimize/compiler').Binding, string>} */
 		const targets = new Map();
 		for (const binding of plan.bindings) {
@@ -152,13 +147,9 @@ export default function preactOptimize(options = {}) {
 				node: wrap.node,
 				open: `${wrap.kind === 'element' ? '{' : ''}${helper(
 					'signals',
-					wrap.kind === 'derived' ? '$derive' : '$hole'
+					wrap.kind === 'derived' ? '$derive' : wrap.text ? '$text' : '$hole'
 				)}(() => (`,
-				close: `)${
-					wrap.deps
-						? `, [${wrap.deps.map(dep => (dep.binding ? targets.get(dep.binding) : dep.prop ? `${dep.name}.${dep.prop}` : dep.name)).join(', ')}], ${sites}[${reusable.indexOf(wrap)}]`
-						: ''
-				})${wrap.kind === 'element' ? '}' : ''}`
+				close: `))${wrap.kind === 'element' ? '}' : ''}`
 			}))
 		].sort((a, b) => a.node.start - b.node.start || b.node.end - a.node.end);
 
@@ -221,7 +212,7 @@ export default function preactOptimize(options = {}) {
 		if (plan.hoists.length) {
 			header += `var ${plan.hoists.map((_, i) => cachePrefix + (i + 1)).join(', ')};\n`;
 		}
-		header += sitesInit + templates.join('');
+		header += templates.join('');
 
 		// Keep directives ("use client") and hashbangs first.
 		let at = program.hashbang ? program.hashbang.end : 0;

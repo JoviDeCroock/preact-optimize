@@ -117,7 +117,9 @@ Children of components are left alone, since a component may inspect `props.chil
 - **If it read signals**, the computed is returned and `@preact/signals` binds it. Text and attributes update in place. For vnode and array values, the `ReactiveTextNode` re-renders only that region.
 - **If it read none** (e.g. `field.value` on a plain object), the plain value is returned and behaviour is unchanged.
 
-The compiler also passes what the expression reads from its render (locals, props, converted state's signals, module bindings) and a per-site key: `$hole(fn, [deps], _k[i])`. When the component re-renders with the same inputs, the hole hands back the computed from its previous render instead of creating and evaluating a new one, so the binding stays put. Inputs compare with `Object.is`, and only primitives, functions and signals count: an object input could have been mutated in place, so it always makes a new computed. When a hole only reads properties of an object (`row.id`, `props.title`), those properties are its inputs instead, unless it calls a method on it. A hole that reads `this`, a ref's `.current` while evaluating, or a global that isn't known to be pure (`Date.now()`, `Math.random()`) is never reused. Holes inside `.map()` callbacks reuse by position. Only computeds holding a primitive are reused; a vnode can't be handed to Preact twice without losing its signal props.
+A fresh computed per render is intentional: the closure captures that render's props and state, and the component re-renders (and recreates the hole) whenever those change. Because the computed can re-run after the render returns, a hole keeps its reads in render when they could see a different value by then: a local that is reassigned anywhere (`let total = 0; ... total += x`, `var` loop counters) or has a property assigned or deleted (`o.v = 1`; refs excepted), and a module binding that is not a constant.
+
+Holes in child position go through `$text`, which hands `NaN` and BigInts to `@preact/signals` as strings: its text binding renders falsy values other than `0` as nothing, where Preact renders `NaN` and `0n`.
 
 ### Derived values
 
@@ -188,8 +190,8 @@ $block([_t, () => (_selected.value === id ? 'danger' : ''), id, () => setSelecte
 
 A tree is a block when it has at least two content nodes and:
 
-- every element is a lowercase HTML tag other than `svg`, `math`, `select`, `option`, `optgroup`, `textarea`, `template`, `script`, `style` or `slot`, and the root is not also an SVG element name (`a`, `title`, `text`...)
-- attributes are plain names with no spread, `ref`, `dangerouslySetInnerHTML`, `is` or `children`, and only the root has a `key`
+- every element is a lowercase HTML tag other than `svg`, `math`, `select`, `option`, `optgroup`, `textarea`, `template`, `script`, `style` or `slot`, and the root is not also an SVG or MathML element name (`a`, `title`, `mi`, `mrow`...)
+- attributes are plain names, each at most once per element, with no spread, `ref`, `dangerouslySetInnerHTML`, `innerHTML`, `innerText`, `textContent`, `is` or `children`, and only the root has a `key`
 - children are text, elements, or expressions that contain no JSX and aren't `children`/`props.children`
 
 At runtime a text slot holding a vnode, an array or other object renders the original JSX for that render instead. Server rendering always renders the original JSX.
@@ -210,20 +212,20 @@ At runtime a text slot holding a vnode, an array or other object renders the ori
 
 The remaining renders are child components receiving new props and initial mounts.
 
-From `pnpm bench:browser` (Chrome, minified production bundles, median of 20 runs, ratio to the untransformed build; lower is better):
+From `pnpm bench:browser` (Chrome, minified production bundles, median of 15 runs, ratio to the untransformed build; lower is better):
 
 | Benchmark                      | none     | default | + `hoistComponents` | + `hooks` | + `blocks` |
 | ------------------------------ | -------- | ------- | ------------------- | --------- | ---------- |
-| create 1,000 rows              | 23.95 ms | 1.00    | 0.99                | 1.06      | 0.92       |
-| update every 10th row          | 7.45 ms  | 0.99    | 0.97                | 1.17      | 0.85       |
-| select a row                   | 1.70 ms  | 0.94    | 0.94                | 0.32      | 0.18       |
-| swap two rows                  | 5.20 ms  | 1.00    | 0.95                | 1.22      | 0.74       |
-| remove a row                   | 4.90 ms  | 0.94    | 0.96                | 1.24      | 0.69       |
-| clear 1,000 rows               | 3.55 ms  | 1.01    | 0.90                | 1.11      | 0.85       |
-| 100 signal counter writes      | 4.50 ms  | 0.31    | 0.31                | 0.31      | 0.31       |
-| 100 keystrokes (`useState`)    | 4.70 ms  | 1.02    | 1.03                | 0.49      | 0.47       |
-| 50 parent re-renders           | 1.70 ms  | 1.00    | 0.65                | 0.47      | 0.41       |
-| geometric mean (13 benchmarks) |          | 0.83    | 0.80                | 0.63      | 0.50       |
+| create 1,000 rows              | 21.60 ms | 1.01    | 1.00                | 1.09      | 0.93       |
+| update every 10th row          | 5.80 ms  | 1.00    | 0.97                | 1.28      | 0.78       |
+| select a row                   | 1.50 ms  | 1.00    | 1.00                | 0.33      | 0.20       |
+| swap two rows                  | 3.50 ms  | 1.03    | 1.06                | 1.49      | 0.74       |
+| remove a row                   | 3.20 ms  | 1.00    | 1.00                | 1.56      | 0.72       |
+| clear 1,000 rows               | 2.40 ms  | 1.00    | 0.92                | 1.25      | 1.00       |
+| 100 signal counter writes      | 4.20 ms  | 0.31    | 0.31                | 0.31      | 0.31       |
+| 100 keystrokes (`useState`)    | 4.20 ms  | 1.02    | 1.02                | 0.45      | 0.45       |
+| 50 parent re-renders           | 1.50 ms  | 1.00    | 0.67                | 0.47      | 0.40       |
+| geometric mean (13 benchmarks) |          | 0.84    | 0.81                | 0.66      | 0.51       |
 
 `hooks` without `blocks` makes list updates slower: a hole per row (`selected === row.id`) costs more on every re-render of the list than it saves on `select`. `blocks` removes that cost.
 
@@ -240,9 +242,8 @@ In the [js-framework-benchmark](https://github.com/krausest/js-framework-benchma
   - State compares with `Object.is` except that `-0` to `0` is no update (signals compare with `!==`).
   - Reads hidden behind calls (`const f = () => x; ... {f()}`) aren't seen by the analysis. They stay correct because the component subscribes when it renders, but they don't move.
   - React Refresh/prefresh hook signatures don't see `$useState`, so adding or removing converted state in a hot update isn't detected as a signature change and the component isn't remounted. Prefer enabling `hooks` in production builds.
-- **Hole reuse** assumes functions are pure, the way the hooks transform assumes renders are: a hole like `{format(count.value)}` whose `format` reads a mutable module variable won't refresh when the component re-renders with the same `count`, since `format` is the same function. It still refreshes when `count` changes.
+- **Mutation the analysis can't see.** Writes are found by name (`x = ...`, `x++`, `o.v = ...`, `delete o.v`), not through calls. A hole that re-runs after a signal write sees an object or array as it is then, where Preact keeps showing what the render saw until the next render. That differs when the object is mutated through a method after the JSX was created (`const a = [n]; const el = <p>{a.length + count.value}</p>; a.push(1)`), or, with `hooks`, when converted object state is mutated in place from outside the component (React, too, expects state to be replaced, not mutated).
 - **`.value` is a syntactic heuristic.** Non-signal `.value` reads in holes stay correct, but allocate a computed per render. A non-signal `x.value` dependency stays an ordinary dependency.
-- **`NaN`** renders as an empty string from a hole, as from any `@preact/signals` text binding, where Preact renders `NaN`.
 - **Blocks** are experimental.
   - Hydrating a block replaces the server-rendered contents of its root element instead of adopting them.
   - A block's template passes through `options.vnode` once, not per render, and its slot values never do, so `preact/compat`'s value-dependent normalization (numeric `style` values, for one) doesn't apply, and devtools don't see inside a block. Leave `blocks` off with compat.
@@ -258,7 +259,7 @@ From `pnpm bench` (jsdom, exact counts per update):
 | ----------------------------------------------- | ---------------------- | ------------ | ------------------- | ------------ |
 | Signal text in a 60-node static page            | 135 vnodes             | 0            | 0                   | 0            |
 | Typing into a `useState` form, 20 static fields | 66 vnodes, 1 render    | 26, 1 render | 26, 1 render        | 0, 0 renders |
-| Parent state + 20 static child components       | 125 vnodes, 22 renders | 105, 22      | 25, 2               | 4, 2         |
+| Parent state + 20 static child components       | 125 vnodes, 22 renders | 125, 22      | 25, 2               | 4, 2         |
 
 ## Testing
 

@@ -11,9 +11,10 @@ import { Fragment, createElement } from 'preact';
  * Clones keep the hoisted vnode's `_original`, which Preact's strict-equality
  * bail compares, but core only bails on component vnodes. Host elements with
  * element children are therefore wrapped in a Fragment (keeping their key),
- * so the whole subtree is skipped on re-render instead of re-diffed. Leaves
- * and text-only elements aren't: re-diffing them (props are the same object)
- * is cheaper than mounting and unmounting a Fragment, which adds up in lists.
+ * so the whole subtree is skipped on re-render instead of re-diffed, as are
+ * elements with signal props. Other leaves and text-only elements aren't:
+ * re-diffing them (props are the same object) is cheaper than mounting and
+ * unmounting a Fragment, which adds up in lists.
  *
  * @template T
  * @param {T} vnode
@@ -22,7 +23,9 @@ import { Fragment, createElement } from 'preact';
 export function $static(vnode) {
 	vnode.__b = 1;
 	const children = vnode.props.children;
-	if (typeof vnode.type == 'string' && children != null && typeof children == 'object') {
+	// `__np` holds the props `@preact/signals` bound to signals: a re-diffed
+	// clone has lost them, which would drop the bindings, so keep it skipped.
+	if (typeof vnode.type == 'string' && ((children != null && typeof children == 'object') || vnode.__np)) {
 		vnode = createElement(Fragment, { key: vnode.key }, vnode);
 		vnode.__b = 1;
 	}

@@ -98,6 +98,7 @@ describe('hoisting', () => {
 			var V = 2;
 			const { D } = x;
 			const C2 = computed(() => 1);
+			const H = () => 1;
 			class K {}
 			function f() {}
 			const MUT = 1; export function g() { MUT2 = 2; }
@@ -106,7 +107,9 @@ describe('hoisting', () => {
 				return <div>
 					<p>{N}</p>
 					<p>{LIST}</p>
-					<p a={LIST} b={OBJ} c={K} d={f} e={def} f2={ns} g={q} />
+					<p a={LIST} b={OBJ} c={K} d={f} h={H} />
+					<p e={def} f2={ns} g={q} />
+					<p a={C2} />
 					<p a={V} />
 					<p a={L} />
 					<p a={D} />
@@ -120,8 +123,7 @@ describe('hoisting', () => {
 			}`);
 		assert.deepEqual(hoists, [
 			'<p>{N}</p>',
-			'<p a={LIST} b={OBJ} c={K} d={f} e={def} f2={ns} g={q} />',
-			'<p a={D} />',
+			'<p a={LIST} b={OBJ} c={K} d={f} h={H} />',
 			'<p>{s}</p>',
 			'<p>{C2}</p>',
 			'<use xlink:href="#a" />'
@@ -173,11 +175,13 @@ describe('hoisting', () => {
 		const { hoists, wraps } = plan(
 			`${SIGNALS}import type { T } from 't';
 			import { type U, V } from 'v';
+			const W = 3;
 			enum E { A }
 			function App(props: { a: T }) {
 				const x = props as unknown as T;
 				return <div>
-					<p a={1 as number} b={(2 satisfies number)} c={V!} />
+					<p a={1 as number} b={(2 satisfies number)} c={W!} d={V} />
+					<p a={1 as number} c={W!} />
 					{(s.value as number)}
 					{s.value!}
 					<p a={(s satisfies T).value} />
@@ -186,7 +190,8 @@ describe('hoisting', () => {
 			{},
 			true
 		);
-		assert.deepEqual(hoists, ['<p a={1 as number} b={(2 satisfies number)} c={V!} />']);
+		// An import could be a signal, so `d={V}` keeps its element dynamic.
+		assert.deepEqual(hoists, ['<p a={1 as number} c={W!} />']);
 		assert.deepEqual(wraps, ['hole: s.value as number', 'hole: s.value!', 'hole: (s satisfies T).value']);
 	});
 });
@@ -438,6 +443,8 @@ describe('scopes', () => {
 			'b: reassigned',
 			'c: reassigned',
 			'd: reassigned',
+			// Mutated in place: its read stays in render.
+			'e: unsafe-expression',
 			'f: reassigned',
 			'g: reassigned',
 			'm: unread'

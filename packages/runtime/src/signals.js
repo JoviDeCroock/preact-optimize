@@ -2,88 +2,6 @@ import { options } from 'preact';
 import { useEffect, useLayoutEffect, useMemo } from 'preact/hooks';
 import { Signal, computed, effect, signal } from '@preact/signals';
 
-/** The component rendering now, and a stamp per render. */
-let current = null;
-let renders = 0;
-
-// `options._render` (mangled `__r`) runs before every component render and
-// `options._commit` (`__c`) once a render pass is done; preact/hooks,
-// imported above, has installed both.
-const prevRender = /** @type {(vnode: any) => void} */ (options.__r);
-options.__r = vnode => {
-	current = vnode.__c;
-	renders++;
-	prevRender(vnode);
-};
-const prevCommit = /** @type {(vnode: any, queue: any[]) => void} */ (options.__c);
-options.__c = (vnode, queue) => {
-	// Scopes evaluated after this (by signal effects) belong to no render.
-	current = null;
-	prevCommit(vnode, queue);
-};
-
-/**
- * One key per reusable scope in a module.
- * @param {number} n
- */
-export function $sites(n) {
-	return Array.from({ length: n }, () => ({}));
-}
-
-/**
- * Inputs a computed can be reused with: values that can't change without
- * becoming different values. Objects can be mutated in place.
- * @param {unknown[]} deps
- */
-const reusable = deps => deps.every(v => typeof v != 'object' || v === null || v instanceof Signal);
-
-/**
- * Values a reused computed can hand out again. A vnode can't: Preact clones a
- * vnode it already rendered, and the clone has lost the signal props
- * `@preact/signals` took out of it, so their bindings would be dropped.
- * @param {unknown} v
- */
-const primitive = v => typeof v != 'object' || v === null;
-
-/**
- * The computed for one evaluation of a scope. A scope compiled with `deps`
- * (everything it reads from its render) and a `site` reuses the computed it
- * made at the same place in the component's previous render when the deps
- * are the same: the expression is then the same function of the same
- * values, so the binding keeps its signal and skips re-binding. Only
- * computeds holding a primitive are reused (see `primitive`). Places count
- * occurrences, so scopes inside `.map()` callbacks reuse by position.
- *
- * @template T
- * @param {() => T} fn
- * @param {unknown[] | undefined} deps
- * @param {object | undefined} site
- * @param {boolean} always return the computed even when it read no signals
- * @returns {import('@preact/signals').ReadonlySignal<T> | T}
- */
-function scope(fn, deps, site, always) {
-	let slots, at;
-	if (site && current && !options.__s && reusable(/** @type {unknown[]} */ (deps))) {
-		const sites = current.__pS || (current.__pS = new Map());
-		let entry = sites.get(site);
-		if (!entry) sites.set(site, (entry = { render: 0, next: 0, slots: [] }));
-		if (entry.render !== renders) {
-			entry.render = renders;
-			entry.next = 0;
-		}
-		slots = entry.slots;
-		at = entry.next++;
-		const hit = slots[at];
-		if (hit && !changed(/** @type {unknown[]} */ (deps), hit.deps) && primitive(hit.c.peek())) return hit.c;
-	}
-	const c = computed(fn);
-	const value = c.peek();
-	// `_sources` (mangled `s`) is the head of the computed's dependency list.
-	if (!always && !c.s) return value;
-	if (slots) slots[at] = { deps, c };
-	return c;
-}
-
 /**
  * Evaluate a JSX expression in its own reactive scope.
  *
@@ -94,14 +12,35 @@ function scope(fn, deps, site, always) {
  * vnode values. When it read none, the plain value is returned and nothing
  * changes compared to the untransformed code.
  *
+ * A fresh computed per render is intentional: the closure captures this
+ * render's props and state, and the component re-renders (and recreates the
+ * hole) whenever those change.
+ *
  * @template T
  * @param {() => T} fn
- * @param {unknown[]} [deps]
- * @param {object} [site]
  * @returns {T}
  */
-export function $hole(fn, deps, site) {
-	return /** @type {T} */ (scope(fn, deps, site, false));
+export function $hole(fn) {
+	const c = computed(fn);
+	const value = c.peek();
+	// `_sources` (mangled `s`) is the head of the computed's dependency list.
+	return c.s ? c : value;
+}
+
+/**
+ * A hole rendered as a child. `@preact/signals` renders a text computed's
+ * falsy values as nothing, where Preact renders `NaN` and `0n`: hand it
+ * those as strings, which render the same.
+ *
+ * @template T
+ * @param {() => T} fn
+ * @returns {T}
+ */
+export function $text(fn) {
+	return $hole(() => {
+		const value = fn();
+		return /** @type {any} */ (value !== value || typeof value == 'bigint' ? '' + value : value);
+	});
 }
 
 /**
@@ -110,11 +49,12 @@ export function $hole(fn, deps, site) {
  *
  * @template T
  * @param {() => T} fn
- * @param {unknown[]} [deps]
- * @param {object} [site]
  */
-export function $derive(fn, deps, site) {
-	return scope(fn, deps, site, true);
+export function $derive(fn) {
+	const c = computed(fn);
+	// Evaluate where the declaration was, like the initializer it replaces.
+	c.peek();
+	return c;
 }
 
 /**

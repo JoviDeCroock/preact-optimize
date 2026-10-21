@@ -150,35 +150,12 @@ export default function preactOptimize(api, options = {}) {
 					Object.assign(root, replacement);
 				}
 
-				// One key per reusable scope, so its computed survives re-renders.
-				const reusable = plan.wraps.filter(wrap => wrap.deps);
-				let sites = null;
-				if (reusable.length) {
-					sites = program.scope.generateUidIdentifier('k');
-					program.scope.push({
-						id: sites,
-						init: t.callExpression(helper('signals', '$sites'), [t.numericLiteral(reusable.length)])
-					});
-				}
 				for (const wrap of plan.wraps) {
 					const args = [t.arrowFunctionExpression([], wrap.node)];
-					if (wrap.deps) {
-						args.push(
-							t.arrayExpression(
-								wrap.deps.map(dep => {
-									if (dep.binding) return t.identifier(/** @type {string} */ (targets.get(dep.binding)));
-									const id = t.identifier(dep.name);
-									return dep.prop ? t.memberExpression(id, t.identifier(dep.prop)) : id;
-								})
-							),
-							t.memberExpression(
-								t.cloneNode(/** @type {any} */ (sites)),
-								t.numericLiteral(reusable.indexOf(wrap)),
-								true
-							)
-						);
-					}
-					const call = t.callExpression(helper('signals', wrap.kind === 'derived' ? '$derive' : '$hole'), args);
+					const call = t.callExpression(
+						helper('signals', wrap.kind === 'derived' ? '$derive' : wrap.text ? '$text' : '$hole'),
+						args
+					);
 					replace(wrap.parent, wrap.key, wrap.node, wrap.kind === 'element' ? t.jsxExpressionContainer(call) : call);
 				}
 

@@ -10,17 +10,6 @@ const UNBINDABLE_PROP = /^(?:on|key$|ref$|children$|style$|dangerouslySetInnerHT
 
 const HOOK_NAME = /^use(?:[A-Z0-9]|$)/;
 
-/**
- * Globals a reactive scope may read and still be reused while its inputs
- * stay the same: they give the same result for the same arguments.
- * (`Math.random` is checked separately.)
- */
-const PURE_GLOBALS = new Set(
-	'undefined NaN Infinity Math Number String Boolean BigInt Symbol Array Object JSON Intl parseInt parseFloat isNaN isFinite encodeURIComponent decodeURIComponent encodeURI decodeURI'.split(
-		' '
-	)
-);
-
 const FUNCTION_TYPES = new Set([
 	'FunctionDeclaration',
 	'FunctionExpression',
@@ -174,6 +163,10 @@ function declarationOf(stmt) {
  * are never reassigned and never shadowed anywhere in the file. Without a
  * full scope analyzer this is deliberately conservative: a name redeclared in
  * any nested scope is left out.
+ * @property {Set<string>} written Names assigned or updated anywhere in the
+ * file, at any depth.
+ * @property {Set<string>} mutated Names whose properties are assigned,
+ * updated or deleted anywhere in the file.
  */
 
 /**
@@ -184,6 +177,10 @@ export function moduleScope(program) {
 	/** @type {Map<string, ModuleBinding>} */
 	const bindings = new Map();
 	const unsafe = new Set();
+	/** @type {Set<string>} */
+	const written = new Set();
+	/** @type {Set<string>} */
+	const mutated = new Set();
 
 	for (const raw of program.body) {
 		const stmt = declarationOf(raw);
@@ -221,6 +218,16 @@ export function moduleScope(program) {
 		}
 	}
 
+	/**
+	 * `o.a.b = x` changes what a later read of `o` sees.
+	 * @param {any} node
+	 */
+	const writeRoot = node => {
+		if (!isMemberLike(node)) return;
+		while (isMemberLike(node)) node = node.object;
+		if (node.type === 'Identifier') mutated.add(node.name);
+	};
+
 	/** @param {any} node @param {boolean} isTop */
 	const visit = (node, isTop) => {
 		switch (node.type) {
@@ -242,9 +249,23 @@ export function moduleScope(program) {
 				break;
 			case 'AssignmentExpression':
 				patternNames(node.left, unsafe);
+				patternNames(node.left, written);
+				writeRoot(node.left);
 				break;
 			case 'UpdateExpression':
 				patternNames(node.argument, unsafe);
+				patternNames(node.argument, written);
+				writeRoot(node.argument);
+				break;
+			case 'UnaryExpression':
+				if (node.operator === 'delete') writeRoot(node.argument);
+				break;
+			case 'ForInStatement':
+			case 'ForOfStatement':
+				if (node.left.type !== 'VariableDeclaration') {
+					patternNames(node.left, unsafe);
+					patternNames(node.left, written);
+				}
 				break;
 		}
 		if (isFunction(node)) {
@@ -255,7 +276,7 @@ export function moduleScope(program) {
 	for (const stmt of program.body) visit(declarationOf(stmt), true);
 
 	for (const name of unsafe) bindings.delete(name);
-	return { bindings };
+	return { bindings, written, mutated };
 }
 
 /**
@@ -288,7 +309,15 @@ function isSignalFactory(init, scope) {
 function isModuleConstant(name, scope, asChild) {
 	const binding = scope.bindings.get(name);
 	if (!binding || binding.kind === 'let') return false;
-	if (!asChild) return true;
+	// An attribute bound to a signal can't be hoisted: Preact clones a hoisted
+	// vnode, and the clone loses the props @preact/signals bound. Imports and
+	// other module values could be signals.
+	if (!asChild) {
+		const init = binding.kind === 'const' && unwrap(binding.init);
+		return (
+			binding.kind === 'function' || binding.kind === 'class' || (!!init && (isFunction(init) || isStaticValue(init)))
+		);
+	}
 	return (
 		binding.kind === 'const' &&
 		!!binding.init &&
@@ -446,6 +475,16 @@ const SVG_ROOTS = new Set(
 	)
 );
 
+/**
+ * MathML element names. A block's DOM is built in its root's namespace, but
+ * Preact switches token elements' (`mi`, `mo`, ...) children back to HTML.
+ */
+const MATH_ROOTS = new Set(
+	'annotation annotation-xml maction menclose merror mfenced mfrac mi mmultiscripts mn mo mover mpadded mphantom mprescripts mroot mrow ms mspace msqrt mstyle msub msubsup msup mtable mtd mtext mtr munder munderover none semantics'.split(
+		' '
+	)
+);
+
 /** @param {any} name */
 const isBlockTag = name =>
 	name.type === 'JSXIdentifier' && /^[a-z][a-z0-9]*$/.test(name.name) && !NON_BLOCK_TAGS.has(name.name);
@@ -468,7 +507,8 @@ const isBlockTag = name =>
  * @returns {BlockShape | null}
  */
 export function blockShape(root) {
-	if (!isBlockTag(root.openingElement.name) || SVG_ROOTS.has(root.openingElement.name.name)) {
+	const rootName = root.openingElement.name;
+	if (!isBlockTag(rootName) || SVG_ROOTS.has(rootName.name) || MATH_ROOTS.has(rootName.name)) {
 		return null;
 	}
 	/** @type {BlockShape['slots']} */
@@ -478,15 +518,22 @@ export function blockShape(root) {
 	/** @param {any} el @param {boolean} isRoot */
 	const element = (el, isRoot) => {
 		if (!isBlockTag(el.openingElement.name)) return false;
+		const seen = new Set();
 		for (const attr of el.openingElement.attributes) {
 			if (attr.type !== 'JSXAttribute' || attr.name.type !== 'JSXIdentifier') return false;
 			const name = attr.name.name;
 			const value = attr.value;
+			// A repeated attribute overwrites its slot, so leave it to JSX.
+			if (seen.has(name)) return false;
+			seen.add(name);
 			if (name === 'key' && isRoot && value) {
 				key = value.type === 'JSXExpressionContainer' ? value.expression : value;
 				continue;
 			}
-			if (/^(?:key|ref|children|dangerouslySetInnerHTML|is)$/.test(name)) return false;
+			// Content props replace the children the template holds.
+			if (/^(?:key|ref|children|dangerouslySetInnerHTML|innerHTML|innerText|textContent|is)$/.test(name)) {
+				return false;
+			}
 			// Literal values stay in the template (the runtime applies the ones
 			// a clone can't carry, like `value`, as properties).
 			if (value && value.type === 'JSXExpressionContainer') {
@@ -974,13 +1021,6 @@ export function analyze(program, code, options = {}) {
 
 	/** @type {any[]} candidate scopes enclosing the current node */
 	let chain = [];
-	/**
-	 * Every scope enclosing the current node, across function boundaries:
-	 * each collects the names it reads from outside itself (its inputs), so
-	 * the runtime can reuse its computed while they stay the same.
-	 * @type {any[]}
-	 */
-	const open = [];
 	/** @type {any} the function whose render the current node belongs to */
 	let frame = null;
 	/** @type {any} the innermost function, sync callbacks included */
@@ -1047,60 +1087,18 @@ export function analyze(program, code, options = {}) {
 		return false;
 	};
 
-	/** @param {string} name the index of the lexical scope declaring `name`, or -1 */
-	const depthOf = name => {
-		let i = lexical.length - 1;
-		while (i >= 0 && !lexical[i].has(name)) i--;
-		return i;
-	};
-
-	/** Open scopes can't be reused: they read something their inputs don't show. */
-	const opaque = () => {
-		for (const s of open) s.inputs = null;
-	};
-
 	/**
-	 * Record a read of `name` as an input of every open scope it comes from
-	 * outside of. When every read is a plain property read (`row.id`), the
-	 * properties are the inputs instead of the object, so a new object with
-	 * the same values doesn't make a new computed. Method calls keep the
-	 * object: a shared prototype method compares equal across objects. So
-	 * does `.value`, which reads a signal.
-	 * @param {string} name @param {any} node @param {any} parent
+	 * Wrapped code reruns later, so a local declared outside a scope and
+	 * written anywhere, or mutated unless it is a ref, could hold a different
+	 * value by then: keep that scope's reads in render.
+	 * @param {string} name
 	 */
-	const input = (name, node, parent) => {
-		const d = depthOf(name);
-		const binding = d >= 0 ? lexical[d].get(name) : null;
-		const member = isMemberLike(parent) && parent.object === node && !parent.computed;
-		const grand = ancestors[ancestors.length - 2];
-		const prop =
-			member &&
-			parent.type === 'MemberExpression' &&
-			parent.property.name !== 'value' &&
-			!(
-				(isCall(grand) || grand.type === 'NewExpression' || grand.type === 'TaggedTemplateExpression') &&
-				(grand.callee === parent || grand.tag === parent)
-			) &&
-			!/^(?:TS|Parenthesized|Chain)/.test(grand.type)
-				? parent.property.name
-				: null;
-		for (const s of open) {
-			if (!s.inputs || d >= s.lex) continue;
-			if (d < 0 && !scope.bindings.has(name)) {
-				// A global: fine when pure.
-				if (!PURE_GLOBALS.has(name) || (member && parent.property.name === 'random')) {
-					s.inputs = null;
-				}
-			} else if (binding && binding.ref) {
-				// Refs never change; reading `.current` while evaluating does.
-				if (member && parent.property.name === 'current' && frame === s.frame) s.inputs = null;
-			} else if (binding !== STABLE) {
-				const seen = s.inputs.get(name);
-				if (!seen) s.inputs.set(name, { node, binding, props: prop ? new Set([prop]) : null });
-				else if (!prop) seen.props = null;
-				else if (seen.props) seen.props.add(prop);
-			}
-		}
+	const unwrapIfWritten = name => {
+		if (!chain.length || !(scope.written.has(name) || scope.mutated.has(name))) return;
+		let at = lexical.length - 1;
+		while (at >= 0 && !lexical[at].has(name)) at--;
+		if (at < 0 || (!scope.written.has(name) && (lexical[at].get(name) || {}).ref)) return;
+		for (const s of chain) if (at < s.lex) s.safe = false;
 	};
 
 	/** @param {string} name */
@@ -1325,23 +1323,16 @@ export function analyze(program, code, options = {}) {
 			const isType =
 				(parent.type === 'JSXMemberExpression' && key === 'object') ||
 				((parent.type === 'JSXOpeningElement' || parent.type === 'JSXClosingElement') && !isHostName(node));
-			if (isType && open.length) {
-				// Reusing a region with components in it would skip their
-				// renders like `memo()`, which only `hoistComponents` opts into.
-				if (hoistComponents) input(node.name, node, parent);
-				else opaque();
-			}
+			if (isType) unwrapIfWritten(node.name);
 			const c = isType && resolve(node.name);
 			if (c) c.writable = true;
 			return;
 		}
 
-		if (node.type === 'ThisExpression' || node.type === 'Super') opaque();
-
 		if (node.type === 'Identifier') {
 			if (!parent || !isReference(parent, key)) return;
-			if (open.length) input(node.name, node, parent);
 			if (ownerStack.length) capture(node);
+			unwrapIfWritten(node.name);
 			const c = resolve(node.name);
 			if (!c) return;
 			if (c.fn) {
@@ -1417,7 +1408,6 @@ export function analyze(program, code, options = {}) {
 		}
 
 		const savedChain = chain;
-		const savedOpen = open.length;
 		const savedFrame = frame;
 		const savedFn = fnNode;
 		let scopes_ = 0;
@@ -1448,13 +1438,9 @@ export function analyze(program, code, options = {}) {
 		/** @param {any} s */
 		const enter = s => {
 			s.safe = isSafe(s.node, s.parent);
-			s.claims = 0;
-			// Names declared at or below this depth are the scope's own.
 			s.lex = lexical.length;
-			s.frame = frame;
-			s.inputs = new Map();
+			s.claims = 0;
 			scopes.push(s);
-			open.push(s);
 			chain = [...chain, s];
 		};
 
@@ -1506,7 +1492,6 @@ export function analyze(program, code, options = {}) {
 				visit(node.body, node, 'body', null, depth);
 				ancestors.pop();
 				lexical.length -= scopes_;
-				open.length = savedOpen;
 				chain = savedChain;
 				frame = savedFrame;
 				fnNode = savedFn;
@@ -1550,7 +1535,13 @@ export function analyze(program, code, options = {}) {
 				node.expression.type !== 'JSXEmptyExpression' &&
 				isBindablePosition(parent, opening)
 			) {
-				enter({ kind: 'hole', node: node.expression, parent: node, key: 'expression' });
+				enter({
+					kind: 'hole',
+					node: node.expression,
+					parent: node,
+					key: 'expression',
+					text: parent.type !== 'JSXAttribute'
+				});
 			} else if (
 				node.type === 'JSXElement' &&
 				key === 'children' &&
@@ -1580,7 +1571,6 @@ export function analyze(program, code, options = {}) {
 					enter(c.scope);
 					visit(node.init, node, 'init', null, depth);
 					chain = saved;
-					open.length = savedOpen;
 				} else {
 					visit(node.init, node, 'init', null, depth);
 				}
@@ -1617,7 +1607,6 @@ export function analyze(program, code, options = {}) {
 
 		ancestors.pop();
 		lexical.length -= scopes_;
-		open.length = savedOpen;
 		chain = savedChain;
 		frame = savedFrame;
 		fnNode = savedFn;
@@ -1839,7 +1828,13 @@ export function analyze(program, code, options = {}) {
 	const wraps = scopes
 		.filter(s => s.claims > 0 && s.kind !== 'slot' && (s.kind !== 'derived' || s.candidate.live))
 		// Scopes are entered in pre-order, so this is outermost first.
-		.map(s => ({ kind: s.kind, node: s.node, parent: s.parent, key: s.key, inputs: s.inputs }));
+		.map(s => ({
+			kind: s.kind,
+			node: s.node,
+			parent: s.parent,
+			key: s.key,
+			text: (s.kind === 'return' || !!s.text) && !s.node.type.startsWith('JSX')
+		}));
 
 	/** @type {Map<any, Binding>} */
 	const bindings = new Map();
@@ -1859,29 +1854,6 @@ export function analyze(program, code, options = {}) {
 					shorthand: r.shorthand
 				}))
 		});
-	}
-
-	// A scope's inputs, as the expressions that hold them where it runs.
-	/** @type {Set<any>} reads rewritten to `<renamed>.value` */
-	const rewritten = new Set();
-	for (const binding of bindings.values()) {
-		for (const ref of binding.references) rewritten.add(ref.node);
-	}
-	for (const wrap of wraps) {
-		const inputs = wrap.inputs;
-		delete wrap.inputs;
-		wrap.deps =
-			inputs &&
-			[...inputs].flatMap(([name, { node, binding, props }]) => {
-				const converted = binding && bindings.get(binding);
-				if (!converted) return props ? [...props].map(prop => ({ name, prop })) : [{ name }];
-				// Converted state is read through its signal, which never
-				// changes, unless the scope runs inside a closure that took a
-				// snapshot of it: then that snapshot is the input.
-				const ref = binding.refs.find((/** @type {any} */ r) => r.node === node);
-				const own = ref.closure && ref.closure.start >= wrap.node.start;
-				return [rewritten.has(node) || own ? { name, binding: converted } : { name }];
-			});
 	}
 
 	/** @type {Map<any, Set<Binding>>} closures and the converted bindings they read */

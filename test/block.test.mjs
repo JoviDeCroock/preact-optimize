@@ -416,14 +416,14 @@ describe('blocks', () => {
 		}
 	});
 
-	test('templates build per namespace: MathML and HTML roots', async () => {
+	test('MathML roots stay plain JSX: token elements switch children to HTML', async () => {
 		const code = `export function Row({ x }) {
 				return <mrow><mi>{x}</mi><mo>+</mo></mrow>;
 			}
 			export function App({ x }) {
 				return <div><math><Row x={x} /></math><p>{x}<Row x={x} /></p></div>;
 			}`;
-		assert.deepEqual(await blockCount(code, BLOCKS), [1, 1]);
+		assert.deepEqual(await blockCount(code, BLOCKS), [0, 0]);
 		for (const via of ['none', 'babel', 'rolldown']) {
 			const { module } = await load(code, via, BLOCKS);
 			const root = container();
@@ -604,8 +604,7 @@ describe('block shapes', () => {
 		const out = await compiled(code, { blocks: true });
 		for (const [via, text] of Object.entries(out)) {
 			assert.equal(
-				(text.match(/\$hole\(\(\) => _?\$block\(\[_?t\d*, \(\) => s\.value\], s\.value\), \[s\], _k\[\d\]\)/g) || [])
-					.length,
+				(text.match(/\$hole\(\(\) => _?\$block\(\[_?t\d*, \(\) => s\.value\], s\.value\)\)/g) || []).length,
 				2,
 				via
 			);
