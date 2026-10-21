@@ -1,0 +1,41 @@
+{
+  "name": "preact-optimize",
+  "version": "0.0.1",
+  "description": "Runtime helpers for babel-plugin-preact-optimize and rolldown-plugin-preact-optimize.",
+  "type": "module",
+  "exports": {
+    "./static": {
+      "types": "./src/static.d.ts",
+      "default": "./src/static.js"
+    },
+    "./signals": {
+      "types": "./src/signals.d.ts",
+      "default": "./src/signals.js"
+    },
+    "./compiler": {
+      "types": "./src/compiler.d.ts",
+      "default": "./src/compiler.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "LICENSE",
+    "src"
+  ],
+  "sideEffects": false,
+  "peerDependencies": {
+    "@preact/signals": ">=2.0.0",
+    "preact": ">=10.25.0 || >=11.0.0-0"
+  },
+  "peerDependenciesMeta": {
+    "@preact/signals": {
+      "optional": true
+    }
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/JoviDeCroock/preact-optimize.git",
+    "directory": "packages/runtime"
+  }
+}

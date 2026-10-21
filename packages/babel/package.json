@@ -1,0 +1,32 @@
+{
+  "name": "babel-plugin-preact-optimize",
+  "version": "0.0.1",
+  "description": "Babel plugin that hoists static JSX and binds signal reads directly to the DOM in Preact.",
+  "type": "module",
+  "main": "./src/index.js",
+  "types": "./index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./src/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "LICENSE",
+    "index.d.ts",
+    "src"
+  ],
+  "dependencies": {
+    "preact-optimize": "workspace:*"
+  },
+  "peerDependencies": {
+    "@babel/core": "^7.22.0 || ^8.0.0"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/JoviDeCroock/preact-optimize.git",
+    "directory": "packages/babel"
+  }
+}
