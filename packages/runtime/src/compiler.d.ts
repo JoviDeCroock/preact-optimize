@@ -18,11 +18,12 @@ export interface Wrap {
 	key: string;
 	/**
 	 * What the scope reads from outside itself, so its computed can be reused
-	 * while they stay the same: a converted binding's signal, or a name.
+	 * while they stay the same: a converted binding's signal, a name, or a
+	 * property of a name (`prop`) when the scope only reads its properties.
 	 * `null` when it reads something else (`this`, impure globals, a ref's
 	 * `.current`, component elements without `hoistComponents`).
 	 */
-	deps: { name: string; binding?: Binding }[] | null;
+	deps: { name: string; prop?: string; binding?: Binding }[] | null;
 }
 export interface Reference {
 	node: any;

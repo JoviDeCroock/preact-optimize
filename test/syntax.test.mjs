@@ -96,7 +96,7 @@ describe('syntax', () => {
 				return <Box label="x"><span>{count.value! + items.length}</span><hr /></Box>;
 			}`;
 		const out = await rolldownTransform(code, 'entry.tsx');
-		assert.match(out.code, /\$hole\(\(\) => \(count\.value! \+ items\.length\), \[count, items\], _k\[0\]\)/);
+		assert.match(out.code, /\$hole\(\(\) => \(count\.value! \+ items\.length\), \[count, items\.length\], _k\[0\]\)/);
 		assert.match(out.code, /<hr \/>/);
 		assert.match(out.code, /\$static\(<hr \/>\)/);
 
@@ -108,7 +108,7 @@ describe('syntax', () => {
 			parserOpts: { plugins: ['jsx'] },
 			plugins: [babelPlugin]
 		});
-		assert.match(babel.code, /_\$hole\(\(\) => count\.value!? \+ items\.length, \[count, items\], _k\[0\]\)/);
+		assert.match(babel.code, /_\$hole\(\(\) => count\.value!? \+ items\.length, \[count, items\.length\], _k\[0\]\)/);
 		assert.match(babel.code, /_\$static\(<hr \/>\)/);
 	});
 

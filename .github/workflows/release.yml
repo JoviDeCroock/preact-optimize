@@ -15,11 +15,11 @@ jobs:
   release:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
         with:
           version: 11.3.0
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: pnpm
@@ -28,13 +28,14 @@ jobs:
       - run: pnpm test
       # Opens a "Version Packages" PR while changesets are pending; publishes
       # once that PR is merged.
-      - uses: changesets/action@v1
+      - uses: changesets/action@v2
         with:
-          version: pnpm run version
-          publish: pnpm run release
-          commit: Version Packages
-          title: Version Packages
+          version-script: pnpm run version
+          publish-script: pnpm run release
+          commit-message: Version Packages
+          pr-title: Version Packages
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+          # setup-node's .npmrc reads the token from here; drop it once the
+          # packages use npm trusted publishing (id-token above).
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           NPM_CONFIG_PROVENANCE: true

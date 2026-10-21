@@ -9,9 +9,11 @@ import { Fragment, createElement } from 'preact';
  * tree to the module for the lifetime of the app.
  *
  * Clones keep the hoisted vnode's `_original`, which Preact's strict-equality
- * bail compares, but core only bails on component vnodes. Host elements are
- * therefore wrapped in a Fragment (keeping their key), so the whole subtree
- * is skipped on re-render instead of re-diffed.
+ * bail compares, but core only bails on component vnodes. Host elements with
+ * element children are therefore wrapped in a Fragment (keeping their key),
+ * so the whole subtree is skipped on re-render instead of re-diffed. Leaves
+ * and text-only elements aren't: re-diffing them (props are the same object)
+ * is cheaper than mounting and unmounting a Fragment, which adds up in lists.
  *
  * @template T
  * @param {T} vnode
@@ -19,7 +21,8 @@ import { Fragment, createElement } from 'preact';
  */
 export function $static(vnode) {
 	vnode.__b = 1;
-	if (typeof vnode.type == 'string') {
+	const children = vnode.props.children;
+	if (typeof vnode.type == 'string' && children != null && typeof children == 'object') {
 		vnode = createElement(Fragment, { key: vnode.key }, vnode);
 		vnode.__b = 1;
 	}

@@ -30,7 +30,7 @@ function depsOf(code, opts = {}) {
 		result[via] = plan.wraps
 			.slice()
 			.sort((a, b) => a.node.start - b.node.start)
-			.map(w => w.deps && w.deps.map(d => (d.binding ? '$' : '') + d.name).join(', '));
+			.map(w => w.deps && w.deps.map(d => (d.binding ? '$' : '') + d.name + (d.prop ? '.' + d.prop : '')).join(', '));
 	}
 	return result;
 }
@@ -60,7 +60,7 @@ describe('reusing scope computeds across renders', () => {
 		assert.equal(runs.rolldown.stats.evals, 2);
 	});
 
-	test('changed inputs, and inputs that are objects, make a new computed', async () => {
+	test('changed inputs make a new computed, including a property changed in place', async () => {
 		const code = `${PRELUDE}
 			export function App() {
 				const [n, setN] = useState(0);
@@ -83,7 +83,10 @@ describe('reusing scope computeds across renders', () => {
 			{}
 		);
 		assert.equal(runs.babel.html.at(-1), '<p title="3">1b</p>');
-		assert.equal(runs.babel.stats.evals, runs.none.stats.evals);
+		// Three renders of two holes; `box.k` is unchanged on the second.
+		assert.equal(runs.none.stats.evals, 6);
+		assert.equal(runs.babel.stats.evals, 5);
+		assert.equal(runs.rolldown.stats.evals, 5);
 	});
 
 	test('holes in .map() reuse by position, and stay correct when items move', async () => {
@@ -202,6 +205,35 @@ describe('reusing scope computeds across renders', () => {
 		assert.match(runs.babel.html.at(-1), /data-total="3"/);
 	});
 
+	test('properties read from an object are the inputs, unless a method is called', async () => {
+		const code = `${PRELUDE}
+			class Item { constructor(n) { this.n = n; } label() { return 'n' + this.n; } }
+			const items = [new Item(1), new Item(2)];
+			export function Row(props) {
+				const [tick, setTick] = useState(0);
+				stats.rerender = () => setTick(t => t + 1);
+				const item = items[tick % 2];
+				return <p data-tick={tick} title={track(props.title + count.value)}>
+					{track(item.label() + count.value)}{new Item(props.n).n + count.value}{props.title.length + count.value}
+				</p>;
+			}
+			export function App() { return <Row title="t" n={1} />; }`;
+		const deps = depsOf(code);
+		const expected = ['track, props.title, count', 'track, item, count', 'Item, props.n, count', 'props.title, count'];
+		assert.deepEqual(deps.babel, expected);
+		assert.deepEqual(deps.rolldown, expected);
+		const runs = await equivalent(
+			code,
+			[m => m.stats.rerender(), m => m.stats.rerender(), m => (m.count.value = 2)],
+			{}
+		);
+		// The title hole evaluates on mount and for the write. The item hole
+		// takes `item` as a whole, an object, so it evaluates every render,
+		// and for the write.
+		assert.equal(runs.babel.stats.evals, 2 + 4);
+		assert.equal(runs.rolldown.stats.evals, 2 + 4);
+	});
+
 	test('scopes that read outside their inputs are not reused', async () => {
 		const code = `import { signal } from '@preact/signals';
 			import { useRef } from 'preact/hooks';
@@ -225,7 +257,8 @@ describe('reusing scope computeds across renders', () => {
 			}`;
 		const deps = depsOf(code);
 		// `ref` is an object input, which the runtime never reuses with.
-		const expected = [null, null, null, 'a, count', 'ref, count', 'count', null, null];
+		// Without hooks a ref is any object: its `.current` is the input.
+		const expected = [null, null, null, 'a, count', 'ref.current, count', 'count', null, null];
 		assert.deepEqual(deps.babel, expected);
 		assert.deepEqual(deps.rolldown, expected);
 		// With hooks the analysis knows refs: never an input, unless `.current`

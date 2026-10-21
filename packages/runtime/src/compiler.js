@@ -1061,13 +1061,29 @@ export function analyze(program, code, options = {}) {
 
 	/**
 	 * Record a read of `name` as an input of every open scope it comes from
-	 * outside of.
+	 * outside of. When every read is a plain property read (`row.id`), the
+	 * properties are the inputs instead of the object, so a new object with
+	 * the same values doesn't make a new computed. Method calls keep the
+	 * object: a shared prototype method compares equal across objects. So
+	 * does `.value`, which reads a signal.
 	 * @param {string} name @param {any} node @param {any} parent
 	 */
 	const input = (name, node, parent) => {
 		const d = depthOf(name);
 		const binding = d >= 0 ? lexical[d].get(name) : null;
 		const member = isMemberLike(parent) && parent.object === node && !parent.computed;
+		const grand = ancestors[ancestors.length - 2];
+		const prop =
+			member &&
+			parent.type === 'MemberExpression' &&
+			parent.property.name !== 'value' &&
+			!(
+				(isCall(grand) || grand.type === 'NewExpression' || grand.type === 'TaggedTemplateExpression') &&
+				(grand.callee === parent || grand.tag === parent)
+			) &&
+			!/^(?:TS|Parenthesized|Chain)/.test(grand.type)
+				? parent.property.name
+				: null;
 		for (const s of open) {
 			if (!s.inputs || d >= s.lex) continue;
 			if (d < 0 && !scope.bindings.has(name)) {
@@ -1078,8 +1094,11 @@ export function analyze(program, code, options = {}) {
 			} else if (binding && binding.ref) {
 				// Refs never change; reading `.current` while evaluating does.
 				if (member && parent.property.name === 'current' && frame === s.frame) s.inputs = null;
-			} else if (binding !== STABLE && !s.inputs.has(name)) {
-				s.inputs.set(name, { node, binding });
+			} else if (binding !== STABLE) {
+				const seen = s.inputs.get(name);
+				if (!seen) s.inputs.set(name, { node, binding, props: prop ? new Set([prop]) : null });
+				else if (!prop) seen.props = null;
+				else if (seen.props) seen.props.add(prop);
 			}
 		}
 	};
@@ -1853,15 +1872,15 @@ export function analyze(program, code, options = {}) {
 		delete wrap.inputs;
 		wrap.deps =
 			inputs &&
-			[...inputs].map(([name, { node, binding }]) => {
+			[...inputs].flatMap(([name, { node, binding, props }]) => {
 				const converted = binding && bindings.get(binding);
-				if (!converted) return { name };
+				if (!converted) return props ? [...props].map(prop => ({ name, prop })) : [{ name }];
 				// Converted state is read through its signal, which never
 				// changes, unless the scope runs inside a closure that took a
 				// snapshot of it: then that snapshot is the input.
 				const ref = binding.refs.find((/** @type {any} */ r) => r.node === node);
 				const own = ref.closure && ref.closure.start >= wrap.node.start;
-				return rewritten.has(node) || own ? { name, binding: converted } : { name };
+				return [rewritten.has(node) || own ? { name, binding: converted } : { name }];
 			});
 	}
 

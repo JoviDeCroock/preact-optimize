@@ -165,9 +165,11 @@ export default function preactOptimize(api, options = {}) {
 					if (wrap.deps) {
 						args.push(
 							t.arrayExpression(
-								wrap.deps.map(dep =>
-									t.identifier(dep.binding ? /** @type {string} */ (targets.get(dep.binding)) : dep.name)
-								)
+								wrap.deps.map(dep => {
+									if (dep.binding) return t.identifier(/** @type {string} */ (targets.get(dep.binding)));
+									const id = t.identifier(dep.name);
+									return dep.prop ? t.memberExpression(id, t.identifier(dep.prop)) : id;
+								})
 							),
 							t.memberExpression(
 								t.cloneNode(/** @type {any} */ (sites)),

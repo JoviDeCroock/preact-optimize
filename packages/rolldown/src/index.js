@@ -156,7 +156,7 @@ export default function preactOptimize(options = {}) {
 				)}(() => (`,
 				close: `)${
 					wrap.deps
-						? `, [${wrap.deps.map(dep => (dep.binding ? targets.get(dep.binding) : dep.name)).join(', ')}], ${sites}[${reusable.indexOf(wrap)}]`
+						? `, [${wrap.deps.map(dep => (dep.binding ? targets.get(dep.binding) : dep.prop ? `${dep.name}.${dep.prop}` : dep.name)).join(', ')}], ${sites}[${reusable.indexOf(wrap)}]`
 						: ''
 				})${wrap.kind === 'element' ? '}' : ''}`
 			}))
