@@ -6,6 +6,22 @@ on:
   pull_request:
 
 jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.3.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: pnpm format:check
+      - run: pnpm typecheck
+
   test:
     runs-on: ubuntu-latest
     strategy:
@@ -23,6 +39,9 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm test
+      - name: Coverage
+        if: matrix.node == 24
+        run: pnpm coverage
       - name: Wide fuzz
         if: matrix.node == 22
-        run: FUZZ_SEEDS=2000 node --test test/fuzz.test.mjs
+        run: pnpm fuzz

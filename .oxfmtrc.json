@@ -1,0 +1,31 @@
+{
+  "$schema": "./node_modules/oxfmt/configuration_schema.json",
+  "endOfLine": "lf",
+  "insertFinalNewline": true,
+  "useTabs": true,
+  "tabWidth": 2,
+  "printWidth": 120,
+  "singleQuote": true,
+  "jsxSingleQuote": false,
+  "quoteProps": "as-needed",
+  "trailingComma": "none",
+  "semi": true,
+  "arrowParens": "avoid",
+  "bracketSameLine": false,
+  "bracketSpacing": true,
+  "experimentalSortPackageJson": false,
+  "ignorePatterns": [
+    "**/node_modules",
+    "test/.tmp/**",
+    "test/corpus/**",
+    "pnpm-lock.yaml",
+    "**/coverage",
+    "CHANGELOG.md"
+  ],
+  "overrides": [
+    {
+      "files": ["*.json", "*.yml", "*.md"],
+      "options": { "useTabs": false, "tabWidth": 2 }
+    }
+  ]
+}

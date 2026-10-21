@@ -1,0 +1,11 @@
+{
+  "$schema": "https://unpkg.com/@changesets/config@3.1.1/schema.json",
+  "changelog": ["@changesets/changelog-github", { "repo": "JoviDeCroock/preact-optimize" }],
+  "commit": false,
+  "fixed": [["babel-plugin-preact-optimize", "rolldown-plugin-preact-optimize", "preact-optimize"]],
+  "linked": [],
+  "access": "public",
+  "baseBranch": "main",
+  "updateInternalDependencies": "patch",
+  "ignore": []
+}

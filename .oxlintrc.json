@@ -1,0 +1,10 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "ignorePatterns": ["test/.tmp/**", "test/corpus/**", "**/coverage/**"],
+  "categories": { "correctness": "error" },
+  "rules": {
+    "no-unused-vars": ["error", { "args": "none", "caughtErrors": "none", "ignoreRestSiblings": true }],
+    "no-unused-expressions": "off",
+    "no-cond-assign": "off"
+  }
+}
