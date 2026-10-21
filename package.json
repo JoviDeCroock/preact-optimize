@@ -15,8 +15,7 @@
     "bench": "node bench/work.mjs",
     "bench:browser": "node bench/browser/run.mjs",
     "changeset": "changeset",
-    "version": "changeset version && pnpm install --lockfile-only",
-    "release": "changeset publish"
+    "version": "changeset version && pnpm install --lockfile-only"
   },
   "license": "MIT",
   "devDependencies": {

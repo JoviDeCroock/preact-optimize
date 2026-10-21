@@ -304,4 +304,4 @@ From `pnpm bench` (jsdom, exact counts per update):
 | `pnpm bench` / `pnpm bench:browser` | the benchmarks above                                                                                |
 | `pnpm changeset`                    | describe a change for the next release                                                              |
 
-The three packages release together through [changesets](https://github.com/changesets/changesets): merging to `main` opens a "Version Packages" PR, and merging that publishes.
+The three packages release together through [changesets](https://github.com/changesets/changesets): merging to `main` opens a "Version Packages" PR. Merging that stages the new versions on npm through trusted publishing (OIDC, no token) and tags a GitHub release; `npm stage approve <stage-id>` publishes them.
