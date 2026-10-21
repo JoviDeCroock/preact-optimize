@@ -48,7 +48,7 @@ const BENCHES = [
 	{ scenario: 'page', name: '100 signal counter writes', setup: [], op: 'count', times: 100 },
 	{ scenario: 'page', name: '100 signal object writes', setup: [], op: 'user', times: 100 },
 	{ scenario: 'form', name: '100 keystrokes (useState)', setup: [], op: 'type', times: 100 },
-	{ scenario: 'form', name: '20 parent class toggles', setup: [], op: 'touch', times: 20 },
+	{ scenario: 'form', name: '200 parent class toggles', setup: [], op: 'touch', times: 200 },
 	{ scenario: 'cards', name: '50 parent re-renders', setup: [], op: 'tick', times: 50 }
 ].filter(b => !args.filter || b.scenario === args.filter || b.name.includes(args.filter));
 

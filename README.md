@@ -196,6 +196,18 @@ A tree is a block when it has at least two content nodes and:
 
 At runtime a text slot holding a vnode, an array or other object renders the original JSX for that render instead. Server rendering always renders the original JSX.
 
+#### Lists
+
+A `.map()` that is the only child of an HTML element, whose callback takes one parameter and returns a keyed block (after `const`/`let` declarations at most), becomes a list:
+
+```jsx
+<tbody>{data.map(row => <tr key={row.id}>...</tr>)}</tbody>
+// becomes
+$list(<tbody />, data, row => $block([_t, ...], row.id), _t, 1)
+```
+
+The element's children are no longer Preact's: rows are matched by key, patched like any block, and only the rows outside the longest run already in order are moved. The last argument says whether the callback is _pure_: it reads nothing that can change between renders other than its parameter. That means module constants and functions, state setters, converted state (read in its slots, as signals), and component functions made only of those. A pure callback isn't called again for an item it rendered before, the way `memo` skips a component whose props are the same, so updating ten rows of a thousand renders ten rows. Otherwise every row renders as before, and only the diff moves out of Preact.
+
 ### Optimization coverage
 
 `report` gets `{ reads, moved, diagnostics, keptState }` per file. `reads` counts reactive reads made while a component renders (`.value` reads, and state reads with `hooks`). `moved` counts those that no longer subscribe the component. On the realistic components in [`test/corpus`](test/corpus) (a todo app, signup form, dashboard with a signal store, tabs with a measuring layout effect, debounced search, reducer counter, modal with a document listener), every read moves:
@@ -214,22 +226,26 @@ The remaining renders are child components receiving new props and initial mount
 
 From `pnpm bench:browser` (Chrome, minified production bundles, median of 15 runs, ratio to the untransformed build; lower is better):
 
-| Benchmark                      | none     | default | + `hoistComponents` | + `hooks` | + `blocks` |
-| ------------------------------ | -------- | ------- | ------------------- | --------- | ---------- |
-| create 1,000 rows              | 21.60 ms | 1.01    | 1.00                | 1.09      | 0.93       |
-| update every 10th row          | 5.80 ms  | 1.00    | 0.97                | 1.28      | 0.78       |
-| select a row                   | 1.50 ms  | 1.00    | 1.00                | 0.33      | 0.20       |
-| swap two rows                  | 3.50 ms  | 1.03    | 1.06                | 1.49      | 0.74       |
-| remove a row                   | 3.20 ms  | 1.00    | 1.00                | 1.56      | 0.72       |
-| clear 1,000 rows               | 2.40 ms  | 1.00    | 0.92                | 1.25      | 1.00       |
-| 100 signal counter writes      | 4.20 ms  | 0.31    | 0.31                | 0.31      | 0.31       |
-| 100 keystrokes (`useState`)    | 4.20 ms  | 1.02    | 1.02                | 0.45      | 0.45       |
-| 50 parent re-renders           | 1.50 ms  | 1.00    | 0.67                | 0.47      | 0.40       |
-| geometric mean (13 benchmarks) |          | 0.84    | 0.81                | 0.66      | 0.51       |
+| Benchmark                   | none     | default | + `hoistComponents` | + `hooks` | + `blocks` |
+| --------------------------- | -------- | ------- | ------------------- | --------- | ---------- |
+| create 1,000 rows           | 21.90 ms | 1.00    | 1.00                | 1.08      | 0.90       |
+| replace 1,000 rows          | 28.60 ms | 0.95    | 0.94                | 1.03      | 0.74       |
+| update every 10th row       | 6.20 ms  | 0.95    | 0.98                | 1.21      | 0.69       |
+| select a row                | 1.80 ms  | 1.00    | 1.00                | 0.22      | 0.17       |
+| swap two rows               | 3.90 ms  | 1.00    | 0.95                | 1.36      | 0.51       |
+| remove a row                | 3.60 ms  | 0.97    | 0.97                | 1.39      | 0.53       |
+| append 1,000 rows           | 24.90 ms | 0.99    | 1.01                | 1.09      | 0.90       |
+| clear 1,000 rows            | 2.20 ms  | 1.09    | 1.00                | 1.27      | 1.00       |
+| 100 signal counter writes   | 4.50 ms  | 0.29    | 0.29                | 0.29      | 0.27       |
+| 100 signal object writes    | 4.40 ms  | 0.32    | 0.32                | 0.30      | 0.27       |
+| 100 keystrokes (`useState`) | 4.60 ms  | 1.02    | 1.00                | 0.41      | 0.41       |
+| 200 parent class toggles    | 5.30 ms  | 1.00    | 1.00                | 0.04      | 0.06       |
+| 50 parent re-renders        | 1.60 ms  | 1.00    | 0.62                | 0.44      | 0.38       |
+| geometric mean              |          | 0.83    | 0.79                | 0.55      | 0.42       |
 
 `hooks` without `blocks` makes list updates slower: a hole per row (`selected === row.id`) costs more on every re-render of the list than it saves on `select`. `blocks` removes that cost.
 
-In the [js-framework-benchmark](https://github.com/krausest/js-framework-benchmark) (keyed, `{ hooks, hoistComponents, blocks }`, all five measured in one run), the CPU geometric mean relative to vanilla JS is 1.35 for preact-optimize, against 1.66 for the same Preact hooks app untransformed, 1.15 for Solid 2 and 1.06 for Vue Vapor. Most of the remaining gap is in updates that touch a few rows (update every 10th, select): the list still re-renders every row's block.
+In the [js-framework-benchmark](https://github.com/krausest/js-framework-benchmark) (keyed, `{ hooks, hoistComponents, blocks }`, all five measured in one run), the geometric mean of each CPU benchmark's mean time relative to vanilla JS is 1.14 for preact-optimize, against 1.61 for the same Preact hooks app untransformed, 1.08 for Solid 2 and 1.06 for Vue Vapor. The row list compiles to a pure `$list`, so update every 10th row, select and swap spend 2.3–3.3 ms in script (Solid 2: 1.8–2.6 ms, untransformed: about 15 ms); the remaining gap is mostly in creating rows (run 1k: 6.3 ms script against Solid's 4.0).
 
 ## Semantics and deviations
 
@@ -249,6 +265,7 @@ In the [js-framework-benchmark](https://github.com/krausest/js-framework-benchma
   - A block's template passes through `options.vnode` once, not per render, and its slot values never do, so `preact/compat`'s value-dependent normalization (numeric `style` values, for one) doesn't apply, and devtools don't see inside a block. Leave `blocks` off with compat.
   - Static attributes come from the template, so a cloned element can list its attributes in a different order than Preact would set them.
   - As with holes, errors thrown by a slot re-running after a signal write surface from that write.
+  - A list reuses a pure row while its item is the same value, so a row doesn't see an item mutated in place, as with `memo`. Errors from a pure row's callback are thrown from the list's element, so a component that is its own error boundary catches them where Preact would pass them to its parent. When a new item's row turns out to hold a vnode in its text, that row is missing for one render: the list re-renders as plain children from then on.
 - **Hydration**: Preact 11.0.1 core mis-hydrates adjacent _numeric_ text children (`<i>{0}{0}</i>` over server `<i>00</i>` becomes `000`). This happens without this plugin too; holes just make it more common.
 
 ## Numbers

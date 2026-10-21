@@ -479,6 +479,11 @@ const SVG_ROOTS = new Set(
  * MathML element names. A block's DOM is built in its root's namespace, but
  * Preact switches token elements' (`mi`, `mo`, ...) children back to HTML.
  */
+/** Marks a reference to a module binding or a global. */
+const GLOBAL = {};
+/** Globals a list row may read and still be skipped. */
+const PURE_GLOBALS = new Set(['undefined', 'NaN', 'Infinity', 'String', 'Number', 'Boolean']);
+
 const MATH_ROOTS = new Set(
 	'annotation annotation-xml maction menclose merror mfenced mfrac mi mmultiscripts mn mo mover mpadded mphantom mprescripts mroot mrow ms mspace msqrt mstyle msub msubsup msup mtable mtd mtext mtr munder munderover none semantics'.split(
 		' '
@@ -564,6 +569,50 @@ export function blockShape(root) {
 		return true;
 	};
 	return element(root, true) && nodes >= 2 ? { slots, key } : null;
+}
+
+/**
+ * `<el>{items.map(row => <tr key={...}>...</tr>)}</el>`: the map is the
+ * element's only child, and `row` takes one parameter and returns a keyed
+ * block, after `const`/`let` declarations at most.
+ * @param {any} node
+ * @param {StaticOptions} opts
+ */
+export function listShape(node, opts) {
+	const name = node.openingElement.name;
+	if (!isBlockTag(name) || SVG_ROOTS.has(name.name) || MATH_ROOTS.has(name.name)) return null;
+	for (const attr of node.openingElement.attributes) {
+		// A spread could hold children.
+		if (attr.type !== 'JSXAttribute') return null;
+		if (/^(?:children|dangerouslySetInnerHTML|innerHTML|innerText|textContent)$/.test(attrName(attr))) return null;
+	}
+	let container = null;
+	for (const child of node.children) {
+		// Whitespace with a line break is dropped from JSX.
+		if (child.type === 'JSXText' && !/\S/.test(child.value) && child.value.includes('\n')) continue;
+		if (child.type !== 'JSXExpressionContainer' || container) return null;
+		if (child.expression.type !== 'JSXEmptyExpression') container = child;
+	}
+	const call = container && container.expression;
+	if (!call || call.type !== 'CallExpression' || call.arguments.length !== 1) return null;
+	const callee = call.callee;
+	if (callee.type !== 'MemberExpression' || callee.computed || callee.property.name !== 'map') return null;
+	const fn = call.arguments[0];
+	if (fn.type !== 'ArrowFunctionExpression' || fn.async || fn.params.length !== 1) return null;
+	if (fn.params[0].type !== 'Identifier') return null;
+	let root = fn.body;
+	if (root.type === 'BlockStatement') {
+		const body = root.body;
+		const last = body[body.length - 1];
+		if (!last || last.type !== 'ReturnStatement' || !last.argument) return null;
+		for (let i = 0; i < body.length - 1; i++) {
+			if (body[i].type !== 'VariableDeclaration' || body[i].kind === 'var') return null;
+		}
+		root = last.argument;
+	}
+	if (root.type !== 'JSXElement' || isStaticJSX(root, opts)) return null;
+	const shape = blockShape(root);
+	return shape && shape.key ? { node, container, items: callee.object, fn, root } : null;
 }
 
 /** `children` and `props.children` are vnodes far more often than text. */
@@ -996,6 +1045,18 @@ export function analyze(program, code, options = {}) {
 	const blockList = [];
 	/** @type {Map<any, any> | null} slot containers of the block being walked */
 	let slotOf = null;
+	/** @type {any[]} `<el>{items.map(row)}</el>` sites */
+	const listSites = [];
+	/** @type {Map<any, any>} list sites by their row function */
+	const listFns = new Map();
+	/** @type {Set<any>} the children of lists, which aren't holes */
+	const listContainers = new Set();
+	/**
+	 * Functions whose references to bindings outside themselves are being
+	 * collected: list rows, and functions held by a component's bindings.
+	 * @type {{ lex: number, free: Map<string, any>, impure: boolean }[]}
+	 */
+	const trackers = [];
 	/** @type {any[]} every candidate reactive scope */
 	const scopes = [];
 	/** @type {any[]} `.value` reads */
@@ -1099,6 +1160,13 @@ export function analyze(program, code, options = {}) {
 		while (at >= 0 && !lexical[at].has(name)) at--;
 		if (at < 0 || (!scope.written.has(name) && (lexical[at].get(name) || {}).ref)) return;
 		for (const s of chain) if (at < s.lex) s.safe = false;
+	};
+
+	/** @param {string} name */
+	const track = name => {
+		let at = lexical.length - 1;
+		while (at >= 0 && !lexical[at].has(name)) at--;
+		for (const tr of trackers) if (at < tr.lex) tr.free.set(name, at < 0 ? GLOBAL : lexical[at].get(name));
 	};
 
 	/** @param {string} name */
@@ -1316,6 +1384,10 @@ export function analyze(program, code, options = {}) {
 			return;
 		}
 
+		if (node.type === 'ThisExpression') {
+			for (const tr of trackers) tr.impure = true;
+		}
+
 		if (node.type === 'JSXIdentifier') {
 			// `<Comp />` and `<ns.Comp />` read a binding as the element type,
 			// which can't go through `.value`. Attribute names and lowercase
@@ -1323,7 +1395,10 @@ export function analyze(program, code, options = {}) {
 			const isType =
 				(parent.type === 'JSXMemberExpression' && key === 'object') ||
 				((parent.type === 'JSXOpeningElement' || parent.type === 'JSXClosingElement') && !isHostName(node));
-			if (isType) unwrapIfWritten(node.name);
+			if (isType) {
+				unwrapIfWritten(node.name);
+				track(node.name);
+			}
 			const c = isType && resolve(node.name);
 			if (c) c.writable = true;
 			return;
@@ -1333,6 +1408,7 @@ export function analyze(program, code, options = {}) {
 			if (!parent || !isReference(parent, key)) return;
 			if (ownerStack.length) capture(node);
 			unwrapIfWritten(node.name);
+			track(node.name);
 			const c = resolve(node.name);
 			if (!c) return;
 			if (c.fn) {
@@ -1390,6 +1466,12 @@ export function analyze(program, code, options = {}) {
 		}
 
 		if (useBlocks && signals && frame && !slotOf && node.type === 'JSXElement') {
+			const list = listShape(node, { hoistComponents, scope });
+			if (list) {
+				listSites.push(Object.assign(list, { parent, key, frame, tracker: null }));
+				listFns.set(list.fn, list);
+				listContainers.add(list.container);
+			}
 			const shape = blockShape(node);
 			if (shape) {
 				const b = {
@@ -1411,6 +1493,8 @@ export function analyze(program, code, options = {}) {
 		const savedFrame = frame;
 		const savedFn = fnNode;
 		let scopes_ = 0;
+		/** @type {any} a list site or binding whose function this is */
+		let tracked = null;
 
 		if (
 			isValueRead(node) &&
@@ -1464,6 +1548,7 @@ export function analyze(program, code, options = {}) {
 									? ancestors[ancestors.length - 2].id
 									: null;
 					const binding = holder && holder.type === 'Identifier' && resolve(holder.name);
+					if (binding && binding.fn) tracked = binding;
 					closureInfo.set(node, {
 						escapes: !(binding && binding.fn) && escapes(node, { callback: false, jsx: hasJSX(node) }),
 						binding: binding && binding.fn ? binding : null
@@ -1472,6 +1557,8 @@ export function analyze(program, code, options = {}) {
 				frame = node;
 				chain = [];
 			}
+			if (listFns.has(node)) tracked = listFns.get(node);
+			if (tracked) trackers.push((tracked.tracker = { lex: lexical.length, free: new Map(), impure: false }));
 			pushScope(functionScopeNames(node));
 			scopes_++;
 			if (frame === node) node._isComponent = isComponent(node, ancestors);
@@ -1496,6 +1583,7 @@ export function analyze(program, code, options = {}) {
 				frame = savedFrame;
 				fnNode = savedFn;
 				if (owner) ownerStack.pop();
+				if (tracked) trackers.pop();
 				delete node._isComponent;
 				return;
 			}
@@ -1533,6 +1621,7 @@ export function analyze(program, code, options = {}) {
 			if (
 				node.type === 'JSXExpressionContainer' &&
 				node.expression.type !== 'JSXEmptyExpression' &&
+				!listContainers.has(node) &&
 				isBindablePosition(parent, opening)
 			) {
 				enter({
@@ -1611,6 +1700,7 @@ export function analyze(program, code, options = {}) {
 		frame = savedFrame;
 		fnNode = savedFn;
 		if (owner) ownerStack.pop();
+		if (tracked) trackers.pop();
 		if (isFunction(node)) delete node._isComponent;
 	};
 
@@ -1902,20 +1992,64 @@ export function analyze(program, code, options = {}) {
 		}
 	}
 
+	const blocks = blockList.map(({ node, parent, key, keyNode, slots }) => ({
+		node,
+		parent,
+		key,
+		keyNode,
+		slots: slots.map((/** @type {any} */ s) => ({
+			node: s.node,
+			container: s.container,
+			name: s.name,
+			reactive: !!s.scope && s.scope.claims > 0
+		}))
+	}));
+
+	/**
+	 * Whether a function reads nothing that changes between renders, besides
+	 * its parameters: module constants, setters, converted state (as signals)
+	 * and functions made of the same.
+	 * @param {any} tr its tracker
+	 * @param {Set<any>} seen functions already being checked
+	 * @returns {boolean}
+	 */
+	const fixed = (tr, seen) => {
+		if (!tr || tr.impure) return false;
+		for (const [name, b] of tr.free) {
+			if (b === GLOBAL) {
+				if (!PURE_GLOBALS.has(name) && !(scope.bindings.has(name) && !scope.mutated.has(name))) return false;
+			} else if (b && b.fn) {
+				if (!seen.has(b) && !fixed(b.tracker, seen.add(b))) return false;
+			} else if (b !== STABLE && !bindings.has(b)) {
+				return false;
+			}
+		}
+		return true;
+	};
+	/** @param {any} node @param {any} fn */
+	const inside = (node, fn) => node.start >= fn.start && node.end <= fn.end;
+	const lists = [];
+	for (const list of listSites) {
+		// A keyed row that isn't static is always a block.
+		const block = /** @type {Plan['blocks'][number]} */ (blocks.find(b => b.node === list.root));
+		const fn = list.fn;
+		// A row is skipped for an item it rendered before, so what it reads
+		// while rendering has to be its own slots' business.
+		const slotted = (/** @type {any} */ read) =>
+			!!read.claimedBy && !!read.claimedBy.node && inside(read.claimedBy.node, fn);
+		const pure =
+			fixed(list.tracker, new Set()) &&
+			valueReads.every(r => r.frame !== list.frame || !inside(r.node, fn) || slotted(r)) &&
+			candidates.every(
+				c => !bindings.has(c) || c.refs.every((/** @type {any} */ r) => !r.eager || !inside(r.node, fn) || slotted(r))
+			);
+		lists.push({ node: list.node, parent: list.parent, key: list.key, items: list.items, fn, block, pure });
+	}
+
 	return {
 		hoists,
-		blocks: blockList.map(({ node, parent, key, keyNode, slots }) => ({
-			node,
-			parent,
-			key,
-			keyNode,
-			slots: slots.map((/** @type {any} */ s) => ({
-				node: s.node,
-				container: s.container,
-				name: s.name,
-				reactive: !!s.scope && s.scope.claims > 0
-			}))
-		})),
+		blocks,
+		lists,
 		wraps,
 		bindings: [...bindings.values()],
 		deps,

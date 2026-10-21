@@ -16,6 +16,13 @@ import { $hole, $text } from './signals.js';
  * Slots compiled as reactive are functions: one effect per block calls them,
  * so the signals they read update the DOM without a render. Text slots that
  * turn out to hold vnodes fall back to the original JSX for that render.
+ *
+ * Lists: `$list(<ul />, items, row, tpl, pure)` is `<ul>{items.map(row)}</ul>`
+ * where `row` returns a keyed block. The `__pol` accessor owns the element's
+ * children: it matches rows by key, patches them like blocks and moves only
+ * the rows outside the longest run already in order. A `pure` row renders
+ * from its item alone, so a row whose item is the same value as last time
+ * isn't rendered again.
  */
 
 /**
@@ -24,10 +31,12 @@ import { $hole, $text } from './signals.js';
  * @property {boolean[]} reactive Per slot, whether it is a function to track.
  * @property {string} [type] The root tag, once `fn` has run.
  * @property {number[]} [text] Indices of text slots.
- * @property {import('@preact/signals').Signal<number>} [epoch] Read by every
- * render with a reactive (or signal) text slot, and bumped when an effect finds a
- * vnode in one, so whatever rendered it (a component, or a hole's computed)
- * runs again and falls back.
+ * @property {import('@preact/signals').Signal<number>} epoch Read by every
+ * render with a reactive (or signal) text slot, and by every list of this
+ * row, and bumped when an effect finds a vnode in one, so whatever rendered
+ * it (a component, or a hole's computed) runs again and falls back.
+ * @property {boolean} [vnodes] A text slot held a vnode once: lists of this
+ * row render their children through Preact from then on.
  * @property {Map<string, Built>} [built] DOM per namespace.
  */
 
@@ -52,7 +61,7 @@ import { $hole, $text } from './signals.js';
 export function $template(fn, reactive) {
 	const flags = [];
 	for (const i of reactive) flags[i] = true;
-	return { fn, reactive: flags };
+	return { fn, reactive: flags, epoch: signal(0) };
 }
 
 /**
@@ -89,7 +98,6 @@ function init(/** @type {Template} */ t) {
 		else if (children != null && typeof children == 'object') walk(children.props.children);
 	};
 	walk(vnode.props.children);
-	t.epoch = signal(0);
 }
 
 /**
@@ -121,8 +129,41 @@ export function $block(values, key) {
 		if (v != null && typeof v == 'object') return fallback(t, values, key);
 	}
 	// Subscribe to the epoch only where an effect may find a vnode later.
-	if (live) /** @type {any} */ (t.epoch).value;
+	if (live) t.epoch.value;
 	return jsx(/** @type {string} */ (t.type), { __pob: () => values }, key);
+}
+
+/** Re-render whatever rendered blocks of `t`, which then fall back. */
+function fallBack(/** @type {Template} */ t) {
+	t.vnodes = true;
+	t.epoch.value = t.epoch.peek() + 1;
+}
+
+/**
+ * `<el>{items.map(row)}</el>`, with `row` returning `$block(..., key)`.
+ * @param {any} vnode The element, without children.
+ * @param {any} items
+ * @param {(item: any) => any} row
+ * @param {Template} t The row's template.
+ * @param {number} pure Whether `row` reads nothing but its item and values
+ * that never change, so it can be skipped for an item it rendered before.
+ */
+export function $list(vnode, items, row, t, pure) {
+	if (HAS_DOM && !options.__s && !t.vnodes) {
+		t.epoch.value;
+		if (pure && Array.isArray(items)) {
+			vnode.props.__pol = () => [items, row, t];
+			return vnode;
+		}
+		const rows = items.map(row);
+		// A row that fell back can't live in the list.
+		if (rows.every((/** @type {any} */ r) => r.props.__pob)) {
+			vnode.props.__pol = () => [rows];
+			return vnode;
+		}
+	}
+	vnode.props.children = items.map(row);
+	return vnode;
 }
 
 /** The original JSX for values a template can't hold. */
@@ -328,8 +369,7 @@ function apply(inst, values) {
 		else if (v instanceof Signal) v = v.value;
 		if (inst.b.slots[i].name == null && v != null && typeof v == 'object') {
 			// A vnode now: re-render whatever rendered this, which falls back.
-			const epoch = /** @type {any} */ (t.epoch);
-			epoch.value = epoch.peek() + 1;
+			fallBack(t);
 		} else {
 			write(inst, i, v);
 		}
@@ -370,6 +410,142 @@ function patch(dom, values) {
 	apply(inst, values);
 }
 
+/**
+ * @typedef {object} Row
+ * @property {Element & { __pb?: Instance }} el
+ * @property {any} key
+ * @property {any} item
+ * @property {number} gen The last reconcile that used it.
+ * @property {number} at Its index after the last reconcile, -1 when new.
+ */
+
+/**
+ * @typedef {object} List
+ * @property {Row[]} rows In order.
+ * @property {Map<any, Row>} keys
+ * @property {Map<any, Row>} items Rows by the item they last rendered, for
+ * pure rows.
+ * @property {number} gen
+ */
+
+/**
+ * Bring the element's rows in line with this render's.
+ * @param {Element & { __ps?: List }} parent
+ * @param {any[]} args `[items, row, template]` for pure rows, `[vnodes]`
+ * otherwise.
+ */
+function reconcile(parent, args) {
+	const [items, row, t] = args;
+	const list = parent.__ps || (parent.__ps = { rows: [], keys: new Map(), items: new Map(), gen: 0 });
+	const gen = ++list.gen;
+	/** @type {Row[]} */
+	const rows = [];
+	for (let i = 0; i < items.length; i++) {
+		const item = items[i];
+		let r = row && list.items.get(item);
+		if (!r || r.gen == gen) {
+			const vnode = row ? untracked(() => row(item)) : item;
+			const payload = vnode.props.__pob;
+			if (!payload) {
+				// Its text holds a vnode. Leave it out until the list re-renders
+				// as plain children.
+				fallBack(t);
+				continue;
+			}
+			const key = vnode.key;
+			r = list.keys.get(key);
+			if (!r || r.gen == gen) {
+				r = {
+					el: parent.ownerDocument.createElementNS(parent.namespaceURI, vnode.type),
+					key,
+					item,
+					gen,
+					at: -1
+				};
+				if (!list.keys.has(key)) list.keys.set(key, r);
+			} else if (r.item !== item) {
+				if (list.items.get(r.item) == r) list.items.delete(r.item);
+				r.item = item;
+			}
+			patch(r.el, payload());
+			if (row) list.items.set(item, r);
+		}
+		r.gen = gen;
+		rows.push(r);
+	}
+	if (!rows.length && parent.childNodes.length == list.rows.length) {
+		// Clearing: one DOM write.
+		for (const r of list.rows) drop(list, r);
+		parent.textContent = '';
+	} else {
+		for (const r of list.rows) if (r.gen != gen) drop(list, r).remove();
+	}
+	// Rows in the longest run already in order stay; the others move in front
+	// of the row after them.
+	const keep = inOrder(rows);
+	/** @type {Node | null} */
+	let anchor = null;
+	for (let i = rows.length; i--;) {
+		const el = rows[i].el;
+		if (!keep[i]) parent.insertBefore(el, anchor);
+		anchor = el;
+	}
+	rows.forEach((r, i) => (r.at = i));
+	list.rows = rows;
+}
+
+/** Forget a row and stop its block. @param {List} list @param {Row} r */
+function drop(list, r) {
+	dispose(r.el);
+	if (list.keys.get(r.key) == r) list.keys.delete(r.key);
+	if (list.items.get(r.item) == r) list.items.delete(r.item);
+	return r.el;
+}
+
+/**
+ * Which rows are in the longest subsequence whose previous positions
+ * increase.
+ * @param {Row[]} rows
+ */
+function inOrder(rows) {
+	const keep = new Uint8Array(rows.length);
+	const prev = new Int32Array(rows.length);
+	/** @type {number[]} Per length, the row ending the best run of it. */
+	const tails = [];
+	for (let i = 0; i < rows.length; i++) {
+		const at = rows[i].at;
+		if (at < 0) continue;
+		let lo = tails.length;
+		if (lo && rows[tails[lo - 1]].at > at) {
+			let hi = lo - 1;
+			lo = 0;
+			while (lo < hi) {
+				const mid = (lo + hi) >> 1;
+				if (rows[tails[mid]].at < at) lo = mid + 1;
+				else hi = mid;
+			}
+		}
+		prev[i] = lo ? tails[lo - 1] : -1;
+		tails[lo] = i;
+	}
+	for (let i = tails.length ? tails[tails.length - 1] : -1; i >= 0; i = prev[i]) keep[i] = 1;
+	return keep;
+}
+
+/**
+ * Stop every row, and remove them unless the element is going away.
+ * @param {Element & { __ps?: List }} parent
+ * @param {boolean} [unmount]
+ */
+function clear(parent, unmount) {
+	const list = /** @type {List} */ (parent.__ps);
+	parent.__ps = undefined;
+	for (const r of list.rows) {
+		drop(list, r);
+		if (!unmount) r.el.remove();
+	}
+}
+
 /** @param {any} proto `Element.prototype` of a realm */
 function install(proto) {
 	Object.defineProperty(proto, '__pob', {
@@ -384,6 +560,17 @@ function install(proto) {
 			}
 		}
 	});
+	Object.defineProperty(proto, '__pol', {
+		configurable: true,
+		set(/** @type {any} */ payload) {
+			try {
+				if (typeof payload == 'function') reconcile(this, payload());
+				else clear(this);
+			} catch (e) {
+				this.__pe = [e];
+			}
+		}
+	});
 }
 
 const HAS_DOM = typeof Element != 'undefined';
@@ -393,13 +580,14 @@ if (HAS_DOM) install(Element.prototype);
 const prevDiffed = /** @type {(vnode: any) => void} */ (options.diffed);
 options.diffed = vnode => {
 	const dom = vnode.__e;
-	const payload = typeof vnode.type == 'string' && vnode.props.__pob;
-	if (payload && dom) {
+	const props = vnode.props;
+	if (typeof vnode.type == 'string' && (props.__pob || props.__pol) && dom) {
 		if (!('__pob' in dom)) {
 			// An element from another document (an iframe, a popup), which
 			// Preact skipped the function-valued prop on.
 			install(dom.ownerDocument.defaultView.Element.prototype);
-			dom.__pob = payload;
+			if (props.__pob) dom.__pob = props.__pob;
+			else dom.__pol = props.__pol;
 		}
 		const error = dom.__pe;
 		if (error) {
@@ -414,7 +602,10 @@ options.diffed = vnode => {
 
 const prevUnmount = /** @type {(vnode: any) => void} */ (options.unmount);
 options.unmount = vnode => {
-	if (typeof vnode.type == 'string' && vnode.props.__pob && vnode.__e.__pb) dispose(vnode.__e);
+	if (typeof vnode.type == 'string') {
+		if (vnode.props.__pob && vnode.__e.__pb) dispose(vnode.__e);
+		else if (vnode.props.__pol) clear(vnode.__e, true);
+	}
 	prevUnmount(vnode);
 };
 

@@ -40,7 +40,8 @@ export function generate(seed) {
 					`data-r={r}`,
 					`onClick={() => s0.value++}`,
 					`data-f={fmt(a)}`,
-					`data-lst={list.value.map(item => item.id).join(',')}`
+					`data-lst={list.value.map(item => item.id).join(',')}`,
+					`data-o={list.value[s1.value]?.id}`
 				])
 			);
 		}
@@ -84,7 +85,13 @@ export function generate(seed) {
 			() => `{list.value.filter(item => item.id > s0.value).map(item => <em key={item.id}>{item.label}</em>)}`,
 			() => `{[a, s0.value].map(x => <u>{x}</u>)}`,
 			() => `{props.children}`,
-			() => `{(() => s1.value + 1)()}`
+			() => `{(() => s1.value + 1)()}`,
+			() => `{list.value[s0.value % 3]?.label ?? 'none'}`,
+			() => `{props.q?.x}{(a > 1 ? null : list.value[0])?.id}`,
+			() =>
+				`<ul>{list.value.map(item => <li key={item.id} class={item.id === a ? 'on' : ''}>{item.label}<b>{b}</b></li>)}</ul>`,
+			() =>
+				`<ol>{list.value.map(item => { const id = item.id; return <li key={id} onClick={() => setA(id)}>{item.label}<i>{id + s0.value}</i></li>; })}</ol>`
 		];
 		if (depth < 3) {
 			options.push(

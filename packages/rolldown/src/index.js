@@ -150,7 +150,20 @@ export default function preactOptimize(options = {}) {
 					wrap.kind === 'derived' ? '$derive' : wrap.text ? '$text' : '$hole'
 				)}(() => (`,
 				close: `))${wrap.kind === 'element' ? '}' : ''}`
-			}))
+			})),
+			// After wraps: inside one that wraps the same element.
+			...plan.lists.map(list => {
+				const container =
+					!plan.wraps.some(wrap => wrap.node === list.node) &&
+					(list.parent.type === 'JSXElement' ||
+						list.parent.type === 'JSXFragment' ||
+						list.parent.type === 'JSXAttribute');
+				return {
+					node: list.node,
+					open: `${container ? '{' : ''}${helper('block', '$list')}(`,
+					close: `)${container ? '}' : ''}`
+				};
+			})
 		].sort((a, b) => a.node.start - b.node.start || b.node.end - a.node.end);
 
 		for (const edit of edits) {
@@ -202,6 +215,17 @@ export default function preactOptimize(options = {}) {
 			}
 			text += `]${key ? `, ${key}` : ''})${container ? '}' : ''}`;
 			s.overwrite(pos, root.end, text, { contentOnly: true });
+		}
+
+		// `<el>{items.map(row)}</el>` to `$list(<el></el>, items, row, template, pure)`.
+		for (const list of plan.lists) {
+			const el = list.node;
+			const opening = el.openingElement;
+			const tag = s.original.slice(opening.name.start, opening.name.end);
+			const template = templatePrefix + (plan.blocks.indexOf(list.block) + 1);
+			s.overwrite(opening.end, list.items.start, `</${tag}>, `, { contentOnly: true });
+			s.overwrite(list.items.end, list.fn.start, ', ', { contentOnly: true });
+			s.overwrite(list.fn.end, el.end, `, ${template}, ${+list.pure}`, { contentOnly: true });
 		}
 
 		let header = '';

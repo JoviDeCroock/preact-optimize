@@ -121,6 +121,8 @@ export default function preactOptimize(api, options = {}) {
 				}
 
 				// Before wraps: a wrap may hold a block root, which changes in place.
+				/** @type {Map<import('preact-optimize/compiler').Block, import('@babel/core').types.Identifier>} */
+				const templates = new Map();
 				for (const block of plan.blocks) {
 					const root = block.node;
 					const opening = root.openingElement;
@@ -141,6 +143,7 @@ export default function preactOptimize(api, options = {}) {
 					// Unused components can drop their templates.
 					t.addComment(init, 'leading', '#__PURE__');
 					program.scope.push({ id: template, init });
+					templates.set(block, template);
 					const call = t.callExpression(helper('block', '$block'), [
 						t.arrayExpression([t.cloneNode(template), ...values]),
 						...(block.keyNode ? [block.keyNode] : [])
@@ -148,6 +151,22 @@ export default function preactOptimize(api, options = {}) {
 					const replacement = inJSX(block.parent) ? t.jsxExpressionContainer(call) : call;
 					for (const key of Object.keys(root)) delete root[key];
 					Object.assign(root, replacement);
+				}
+
+				// The element becomes `$list(<el />, items, row, template, pure)`.
+				for (const list of plan.lists) {
+					const el = list.node;
+					const call = t.callExpression(helper('block', '$list'), [
+						t.jsxElement(el.openingElement, el.closingElement, [], false),
+						list.items,
+						list.fn,
+						t.cloneNode(/** @type {any} */ (templates.get(list.block))),
+						t.numericLiteral(+list.pure)
+					]);
+					const wrapped = plan.wraps.some(wrap => wrap.node === el);
+					const replacement = !wrapped && inJSX(list.parent) ? t.jsxExpressionContainer(call) : call;
+					for (const key of Object.keys(el)) delete el[key];
+					Object.assign(el, replacement);
 				}
 
 				for (const wrap of plan.wraps) {

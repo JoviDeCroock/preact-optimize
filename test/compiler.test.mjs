@@ -35,6 +35,12 @@ function summarize(plan, code) {
 		),
 		diagnostics: plan.diagnostics.map(d => `${d.reason} ${text(d.node)} @${d.line}:${d.column}`),
 		keptState: plan.keptState.map(k => `${k.name}: ${k.reason}`),
+		blocks: plan.blocks.map(
+			b =>
+				`${text(b.node)} [${b.slots.map(s => `${s.name ?? 'text'}${s.reactive ? '~' : ''}: ${text(s.node)}`).join(', ')}]` +
+				(b.keyNode ? ` key ${text(b.keyNode)}` : '')
+		),
+		lists: plan.lists.map(l => `${text(l.items)} ${l.pure ? 'pure' : 'impure'}: ${text(l.block.node)}`),
 		stats: plan.stats
 	};
 }
@@ -684,5 +690,31 @@ describe('helpers', () => {
 			)
 		);
 		assert.deepEqual([...scope.bindings.keys()], ['a', 'f', 'C']);
+	});
+});
+
+describe('blocks and lists', () => {
+	test('both parsers find the same blocks, slots and lists', () => {
+		const { blocks, lists } = plan(
+			`import { useState } from 'preact/hooks';
+			export function App({ title }) {
+				const [rows, setRows] = useState([]);
+				const [selected, setSelected] = useState(0);
+				return (
+					<div>
+						<h1 class={title}>{title}<i /></h1>
+						<ul>{rows.map(row => <li key={row.id} class={row.id === selected ? 'on' : ''} onClick={() => setSelected(row.id)}>{row.label}<b /></li>)}</ul>
+					</div>
+				);
+			}`,
+			{ blocks: true, hooks: true }
+		);
+		assert.deepEqual(blocks.length, 2);
+		assert.match(blocks[0], /^<h1 .*\[class: title, text: title\]$/);
+		assert.match(
+			blocks[1],
+			/\[class~: row\.id === selected \? 'on' : '', onClick: \(\) => setSelected\(row\.id\), text: row\.label\] key row\.id$/
+		);
+		assert.deepEqual(lists, [`rows pure: ${blocks[1].split(' [')[0]}`]);
 	});
 });

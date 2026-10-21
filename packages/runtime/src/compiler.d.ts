@@ -45,6 +45,26 @@ export interface Block {
 	/** Attribute values (`name`) and text children (`name: null`) in source order. */
 	slots: { node: any; container: any; name: string | null; reactive: boolean }[];
 }
+/** `<el>{items.map(row)}</el>`, where `row` returns the keyed block `block`. */
+export interface List {
+	/** The element. */
+	node: any;
+	parent: any;
+	key: string;
+	items: any;
+	/** The row function. */
+	fn: any;
+	block: Block;
+	/** Whether the row reads nothing that changes between renders but its item. */
+	pure: boolean;
+}
+export interface ListShape {
+	node: any;
+	container: any;
+	items: any;
+	fn: any;
+	root: any;
+}
 export interface BlockShape {
 	slots: { node: any; container: any; name: string | null }[];
 	key: any;
@@ -59,6 +79,7 @@ export interface Plan {
 	hoists: { node: any; parent: any; key: string }[];
 	wraps: Wrap[];
 	blocks: Block[];
+	lists: List[];
 	bindings: Binding[];
 	/** Render-created functions that start by snapshotting converted values. */
 	snapshots: { fn: any; bindings: Binding[] }[];
@@ -90,4 +111,5 @@ export declare function isStaticJSX(node: any, opts: StaticOptions): boolean;
 export declare function isBindableAttribute(attr: any): boolean;
 export declare function isBindablePosition(parent: any, opening?: any): boolean;
 export declare function blockShape(root: any): BlockShape | null;
+export declare function listShape(node: any, opts: StaticOptions): ListShape | null;
 export declare function analyze(program: any, code: string, options?: AnalyzeOptions): Plan;
