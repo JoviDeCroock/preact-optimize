@@ -7,6 +7,11 @@ import { rolldown } from 'rolldown';
 import babelPlugin from '../packages/babel/src/index.js';
 import rolldownPlugin from '../packages/rolldown/src/index.js';
 
+// A zero-delay frame, so passive effects (which wait for the next frame, or
+// 35ms without one) run within a few macrotasks.
+globalThis.requestAnimationFrame = cb => setTimeout(cb, 0);
+globalThis.cancelAnimationFrame = id => clearTimeout(id);
+
 const dom = new JSDOM('<!doctype html><html><body></body></html>');
 for (const key of ['window', 'document', 'Node', 'Text', 'Element', 'HTMLElement', 'Event', 'InputEvent']) {
 	globalThis[key] = key === 'window' ? dom.window : dom.window[key];
@@ -21,18 +26,20 @@ let fileId = 0;
  * @param {string} code
  * @param {'none' | 'babel' | 'rolldown'} via
  * @param {object} [options] plugin options
+ * @param {'jsx' | 'tsx'} [lang]
  */
-export async function compile(code, via, options = {}) {
+export async function compile(code, via, options = {}, lang = 'jsx') {
+	const entry = `entry.${lang}`;
 	if (via === 'rolldown') {
 		const bundle = await rolldown({
-			input: 'entry.jsx',
-			external: id => id !== 'entry.jsx',
+			input: entry,
+			external: id => id !== entry,
 			logLevel: 'silent',
 			plugins: [
 				{
 					name: 'virtual',
-					resolveId: id => (id === 'entry.jsx' ? id : null),
-					load: id => (id === 'entry.jsx' ? code : null)
+					resolveId: id => (id === entry ? id : null),
+					load: id => (id === entry ? code : null)
 				},
 				rolldownPlugin(options)
 			],
@@ -43,9 +50,10 @@ export async function compile(code, via, options = {}) {
 	}
 
 	const result = await transformAsync(code, {
-		filename: 'entry.jsx',
+		filename: entry,
 		babelrc: false,
 		configFile: false,
+		presets: lang === 'tsx' ? ['@babel/preset-typescript'] : [],
 		plugins: [
 			...(via === 'babel' ? [[babelPlugin, options]] : []),
 			['@babel/plugin-transform-react-jsx', { runtime: 'automatic', importSource: 'preact' }]
@@ -55,17 +63,34 @@ export async function compile(code, via, options = {}) {
 }
 
 /** Compile and import a fixture module. */
-export async function load(code, via, options) {
-	const out = await compile(code, via, options);
-	const file = `${tmp}fixture-${++fileId}-${via}.mjs`;
+export async function load(code, via, options, lang) {
+	const out = await compile(code, via, options, lang);
+	const file = `${tmp}fixture-${process.pid}-${++fileId}-${via}.mjs`;
 	writeFileSync(file, out);
 	return { module: await import(pathToFileURL(file).href), code: out };
 }
 
 export const VARIANTS = ['none', 'babel', 'rolldown'];
 
+/**
+ * Serialized DOM with each element's attributes sorted. A block's template
+ * carries its static attributes, so slots set after them can serialize in a
+ * different order than Preact's prop order: not observable otherwise.
+ * @param {string} html
+ */
+export const canonical = html =>
+	html.replace(/<([a-z][\w-]*)((?:\s[^\s=>]+(?:="[^"]*")?)+)>/g, (_, tag, attrs) => {
+		const list = attrs.match(/[^\s=>]+(?:="[^"]*")?/g);
+		return `<${tag} ${list.sort().join(' ')}>`;
+	});
+
 /** Flush Preact's debounced render queue and pending microtasks. */
 export const tick = () => new Promise(r => setTimeout(r, 0));
+
+/** Wait until renders, signal DOM flushes and passive effects are done. */
+export const settle = async () => {
+	for (let i = 0; i < 4; i++) await tick();
+};
 
 export function container() {
 	const el = document.createElement('div');
@@ -78,25 +103,24 @@ export function container() {
  * check the DOM matches the untransformed build after every step. Returns the
  * per-variant render stats so tests can assert on work saved.
  */
-export async function equivalent(code, steps, options) {
+export async function equivalent(code, steps, options, lang) {
 	const { h, render } = await import('preact');
 	const runs = {};
 	for (const via of VARIANTS) {
-		const { module } = await load(code, via, options);
+		const { module } = await load(code, via, options, lang);
 		const root = container();
 		render(h(module.App, null), root);
-		await tick();
+		await settle();
 		const html = [root.innerHTML];
 		for (const step of steps) {
 			await step(module, root);
-			await tick();
+			await settle();
 			html.push(root.innerHTML);
 		}
 		runs[via] = { html, stats: { ...module.stats }, module, root };
 	}
 	for (const via of ['babel', 'rolldown']) {
-		assert.deepEqual(runs[via].html, runs.none.html, `${via} DOM diverged`);
+		assert.deepEqual(runs[via].html.map(canonical), runs.none.html.map(canonical), `${via} DOM diverged`);
 	}
 	return runs;
 }
-

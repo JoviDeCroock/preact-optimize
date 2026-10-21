@@ -7,7 +7,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { h, render } from 'preact';
-import { VARIANTS, container, load, tick } from './harness.mjs';
+import { VARIANTS, canonical, container, load, settle } from './harness.mjs';
 import { apply, generate } from './fuzz-gen.mjs';
 
 const SEEDS = Number(process.env.FUZZ_SEEDS || 150);
@@ -15,6 +15,7 @@ const START = Number(process.env.FUZZ_START || 1);
 
 const OPTION_SETS = [
 	{ hoistComponents: true, hooks: true },
+	{ hoistComponents: true, hooks: true, blocks: true },
 	{ hoist: false, hooks: true },
 	{ signals: false, hoistComponents: true }
 ];
@@ -33,12 +34,12 @@ test(`differential fuzz (${SEEDS} seeds from ${START})`, async () => {
 			}
 			const root = container();
 			render(h(module.App, null), root);
-			await tick();
-			html[via] = [root.innerHTML];
+			await settle();
+			html[via] = [canonical(root.innerHTML)];
 			for (const step of steps) {
 				apply(module, root, step);
-				await tick();
-				html[via].push(root.innerHTML);
+				await settle();
+				html[via].push(canonical(root.innerHTML));
 			}
 			render(null, root);
 			root.remove();

@@ -2,12 +2,11 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { h, hydrate, render } from 'preact';
 import { renderToString } from 'preact-render-to-string';
-import { VARIANTS, container, load, tick } from './harness.mjs';
+import { VARIANTS, canonical, container, load, settle } from './harness.mjs';
 import { apply, generate } from './fuzz-gen.mjs';
 
 /** Server style serialization (`color:red;`) survives hydration. */
-const normalize = html =>
-	html.replace(/style="([^"]*)"/g, (_, v) => `style="${v.replace(/\s+/g, '')}"`);
+const normalize = html => html.replace(/style="([^"]*)"/g, (_, v) => `style="${v.replace(/\s+/g, '')}"`);
 
 const SEEDS = Number(process.env.SSR_SEEDS || 60);
 const OPTIONS = { hoistComponents: true, hooks: true };
@@ -21,10 +20,12 @@ test(`server output matches and hydrates (${SEEDS} seeds)`, async t => {
 	const skipped = [];
 	for (let seed = 1; seed <= SEEDS; seed++) {
 		const { code, steps } = generate(seed);
+		// Odd seeds also compile host-only trees to blocks.
+		const options = seed % 2 ? { ...OPTIONS, blocks: true } : OPTIONS;
 		const html = {};
 		const modules = {};
 		for (const via of VARIANTS) {
-			modules[via] = (await load(code, via, OPTIONS)).module;
+			modules[via] = (await load(code, via, options)).module;
 			html[via] = renderToString(h(modules[via].App, null));
 		}
 		assert.equal(html.babel, html.none, `seed ${seed} babel SSR\n${code}`);
@@ -32,6 +33,7 @@ test(`server output matches and hydrates (${SEEDS} seeds)`, async t => {
 
 		const client = container();
 		render(h(modules.none.App, null), client);
+		await settle();
 		const clientHtml = client.innerHTML;
 		render(null, client);
 
@@ -39,7 +41,7 @@ test(`server output matches and hydrates (${SEEDS} seeds)`, async t => {
 		const reference = container();
 		reference.innerHTML = html.none;
 		hydrate(h(modules.none.App, null), reference);
-		await tick();
+		await settle();
 		if (normalize(reference.innerHTML) !== normalize(clientHtml)) {
 			skipped.push(seed);
 			render(null, reference);
@@ -48,25 +50,25 @@ test(`server output matches and hydrates (${SEEDS} seeds)`, async t => {
 		const expected = [reference.innerHTML];
 		for (const step of steps) {
 			apply(modules.none, reference, step);
-			await tick();
+			await settle();
 			expected.push(reference.innerHTML);
 		}
 		render(null, reference);
 
 		// Transformed clients hydrating the server markup, then updating.
 		for (const via of ['babel', 'rolldown']) {
-			const { module } = await load(code, via, OPTIONS);
+			const { module } = await load(code, via, options);
 			const root = container();
 			root.innerHTML = html.none;
 			hydrate(h(module.App, null), root);
-			await tick();
+			await settle();
 			const actual = [root.innerHTML];
 			for (const step of steps) {
 				apply(module, root, step);
-				await tick();
+				await settle();
 				actual.push(root.innerHTML);
 			}
-			assert.deepEqual(actual, expected, `seed ${seed} ${via} hydration\n${code}`);
+			assert.deepEqual(actual.map(canonical), expected.map(canonical), `seed ${seed} ${via} hydration\n${code}`);
 			render(null, root);
 		}
 	}

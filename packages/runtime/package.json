@@ -12,6 +12,10 @@
       "types": "./src/signals.d.ts",
       "default": "./src/signals.js"
     },
+    "./block": {
+      "types": "./src/block.d.ts",
+      "default": "./src/block.js"
+    },
     "./compiler": {
       "types": "./src/compiler.d.ts",
       "default": "./src/compiler.js"
@@ -22,7 +26,10 @@
     "LICENSE",
     "src"
   ],
-  "sideEffects": false,
+  "sideEffects": [
+    "./src/block.js",
+    "./src/signals.js"
+  ],
   "peerDependencies": {
     "@preact/signals": ">=2.0.0",
     "preact": ">=10.25.0 || >=11.0.0-0"

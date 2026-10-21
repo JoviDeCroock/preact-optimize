@@ -96,7 +96,7 @@ describe('syntax', () => {
 				return <Box label="x"><span>{count.value! + items.length}</span><hr /></Box>;
 			}`;
 		const out = await rolldownTransform(code, 'entry.tsx');
-		assert.match(out.code, /\$hole\(\(\) => \(count\.value! \+ items\.length\)\)/);
+		assert.match(out.code, /\$hole\(\(\) => \(count\.value! \+ items\.length\), \[count, items\], _k\[0\]\)/);
 		assert.match(out.code, /<hr \/>/);
 		assert.match(out.code, /\$static\(<hr \/>\)/);
 
@@ -108,7 +108,7 @@ describe('syntax', () => {
 			parserOpts: { plugins: ['jsx'] },
 			plugins: [babelPlugin]
 		});
-		assert.match(babel.code, /_\$hole\(\(\) => count\.value!? \+ items\.length\)/);
+		assert.match(babel.code, /_\$hole\(\(\) => count\.value!? \+ items\.length, \[count, items\], _k\[0\]\)/);
 		assert.match(babel.code, /_\$static\(<hr \/>\)/);
 	});
 
@@ -140,10 +140,7 @@ describe('syntax', () => {
 	});
 
 	test('emits a source map', async () => {
-		const out = await rolldownTransform(
-			`export function App() {\n  return <p>static</p>;\n}`,
-			'entry.jsx'
-		);
+		const out = await rolldownTransform(`export function App() {\n  return <p>static</p>;\n}`, 'entry.jsx');
 		assert.ok(out.map, 'map');
 		assert.ok(out.map.mappings.length > 0);
 	});
@@ -157,7 +154,8 @@ describe('syntax', () => {
 		await equivalent(code, [m => (m.s.value = 2)]);
 	});
 
-	test('module-level JSX is not hoisted but still binds', async () => {
+	test('module-level JSX is left alone', async () => {
+		// It runs once at module init, so binding it would change behaviour.
 		for (const via of ['babel', 'rolldown']) {
 			const { code } = await load(
 				`import { signal } from '@preact/signals';
@@ -166,8 +164,79 @@ describe('syntax', () => {
 				export const App = () => tree;`,
 				via
 			);
-			assert.doesNotMatch(code, /\$static\(/, via);
-			assert.match(code, /\$hole\(/, via);
+			assert.doesNotMatch(code, /\$static\(|\$hole\(/, via);
 		}
+	});
+
+	test('report lists what stayed in render', async () => {
+		const code = `import { signal } from '@preact/signals';
+			import { useEffect, useState } from 'preact/hooks';
+			const s = signal(1);
+			export function App() {
+				const [n, setN] = useState(0);
+				useEffect(() => {}, []);
+				if (s.value > 1) return null;
+				return <p onClick={() => setN(n + 1)}>{s.value}{n}</p>;
+			}`;
+		const reports = {};
+		for (const via of ['babel', 'rolldown']) {
+			await load(code, via, { hooks: true, report: (file, report) => (reports[via] = { file, ...report }) });
+		}
+		assert.match(reports.babel.file, /entry\.jsx$/);
+		assert.equal(reports.rolldown.file, 'entry.jsx');
+		for (const via of ['babel', 'rolldown']) {
+			const { file, ...report } = reports[via];
+			assert.deepEqual(
+				report,
+				{
+					reads: 3,
+					moved: 2,
+					diagnostics: [{ line: 7, column: 8, reason: 'control-flow' }],
+					keptState: []
+				},
+				via
+			);
+		}
+	});
+
+	test('a hoist nested at the start of a hole', async () => {
+		const code = `import { signal } from '@preact/signals';
+			export const s = signal(0);
+			export function App() { return <div>{<b>static</b> && s.value}</div>; }`;
+		await equivalent(code, [m => (m.s.value = 2)]);
+		for (const via of ['babel', 'rolldown']) {
+			const { code: out } = await load(code, via);
+			// The hoist sits inside the hole even though both start at `<b>`.
+			assert.match(out, /\$hole\(\(\) => \(+_h1? \|\|/, via);
+		}
+	});
+
+	test('private names are not references', async () => {
+		const code = `import { useState } from 'preact/hooks';
+			export const stats = {};
+			export function App() {
+				const [f, setF] = useState(1);
+				class Box { #f = 'private'; get() { return this.#f; } }
+				stats.set = setF;
+				return <p onClick={() => setF(f + 1)}>{f}{new Box().get()}</p>;
+			}`;
+		const runs = await equivalent(code, [m => m.stats.set(5)], { hooks: true });
+		assert.match(runs.babel.html[1], /5private/);
+	});
+
+	test('nested declarations and catch patterns shadow', async () => {
+		const code = `import { useState } from 'preact/hooks';
+			import { signal } from '@preact/signals';
+			export const s = signal('x');
+			export const stats = {};
+			export function App() {
+				const [n, setN] = useState(1);
+				stats.set = setN;
+				function label() { return 'n'; }
+				try { throw {}; } catch ({ e = s.value }) { stats.caught = e; }
+				return <p>{label()}{n}</p>;
+			}`;
+		const runs = await equivalent(code, [m => m.stats.set(3)], { hooks: true });
+		assert.equal(runs.babel.html[1], '<p>n3</p>');
 	});
 });

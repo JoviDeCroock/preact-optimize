@@ -1,12 +1,17 @@
+import { Fragment, createElement } from 'preact';
+
 /**
- * Mark a hoisted vnode so Preact always clones it before diffing. Preact
- * clones vnodes whose `_depth` (mangled `__b`) is already set, the same trick
- * `@preact/signals` uses for `Signal.prototype`. Without it the first render
- * would adopt the shared object and pin that render's DOM and vnode tree to
- * the module for the lifetime of the app.
+ * Prepare a hoisted vnode for reuse across renders.
  *
- * Clones keep the hoisted vnode's `_original`, which is what lets Preact's
- * strict-equality bail skip the subtree on later renders.
+ * Preact clones vnodes whose `_depth` (mangled `__b`) is already set, the same
+ * trick `@preact/signals` uses for `Signal.prototype`. Without it the first
+ * render would adopt the shared object and pin that render's DOM and vnode
+ * tree to the module for the lifetime of the app.
+ *
+ * Clones keep the hoisted vnode's `_original`, which Preact's strict-equality
+ * bail compares, but core only bails on component vnodes. Host elements are
+ * therefore wrapped in a Fragment (keeping their key), so the whole subtree
+ * is skipped on re-render instead of re-diffed.
  *
  * @template T
  * @param {T} vnode
@@ -14,5 +19,9 @@
  */
 export function $static(vnode) {
 	vnode.__b = 1;
+	if (typeof vnode.type == 'string') {
+		vnode = createElement(Fragment, { key: vnode.key }, vnode);
+		vnode.__b = 1;
+	}
 	return vnode;
 }

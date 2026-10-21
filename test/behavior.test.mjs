@@ -47,12 +47,7 @@ describe('signal holes', () => {
 				stats.renders++;
 				return <div>{show.value ? <b>{msg.value}</b> : <i>off</i>}</div>;
 			}`,
-			[
-				m => (m.show.value = true),
-				m => (m.msg.value = 'b'),
-				m => (m.show.value = false),
-				m => (m.show.value = true)
-			]
+			[m => (m.show.value = true), m => (m.msg.value = 'b'), m => (m.show.value = false), m => (m.show.value = true)]
 		);
 		assert.equal(runs.none.stats.renders, 5);
 		assert.equal(runs.babel.stats.renders, 1);
@@ -93,11 +88,7 @@ describe('signal holes', () => {
 				stats.setPrefix = setPrefix;
 				return <Label prefix={prefix} />;
 			}`,
-			[
-				m => (m.count.value = 1),
-				m => m.stats.setPrefix('b'),
-				m => (m.count.value = 2)
-			]
+			[m => (m.count.value = 1), m => m.stats.setPrefix('b'), m => (m.count.value = 2)]
 		);
 	});
 
@@ -124,12 +115,7 @@ describe('signal holes', () => {
 				stats.renders++;
 				return <div>{show.value && <p>{msg.value}</p>}</div>;
 			}`,
-			[
-				m => (m.msg.value = 'b'),
-				m => (m.show.value = false),
-				m => (m.msg.value = 'c'),
-				m => (m.show.value = true)
-			]
+			[m => (m.msg.value = 'b'), m => (m.show.value = false), m => (m.msg.value = 'c'), m => (m.show.value = true)]
 		);
 		assert.equal(runs.babel.stats.renders, 1);
 		assert.equal(runs.rolldown.stats.renders, 1);
@@ -223,7 +209,10 @@ describe('static hoisting', () => {
 		assert.match(code, /\$static/);
 		const root = container();
 		render(h(module.App, null), root);
-		assert.equal(root.innerHTML, '<ul><li class="item">static</li><li class="item">static</li><li class="item">static</li></ul>');
+		assert.equal(
+			root.innerHTML,
+			'<ul><li class="item">static</li><li class="item">static</li><li class="item">static</li></ul>'
+		);
 		// The shared vnode itself is never mounted: `_dom` (mangled `__e`) stays unset.
 		const shared = module.Item();
 		assert.equal(shared.__e, null);

@@ -101,8 +101,8 @@ describe('babel 7', () => {
 				[require.resolve('babel7-jsx'), JSX]
 			]
 		});
-		assert.match(result.code, /_\$hole\(\(\) => count\.value\)/);
-		assert.match(result.code, /_\$hole\(\(\) => _text\.value\)/);
+		assert.match(result.code, /_\$hole\(\(\) => count\.value, \[count\], _k\[\d\]\)/);
+		assert.match(result.code, /_\$hole\(\(\) => _text\.value, \[_text\], _k\[\d\]\)/);
 		assert.match(result.code, /_\$useState\('a'\)/);
 		assert.match(result.code, /_h \|\| \(_h = _\$static\(_jsxs?\("h1"/);
 	});

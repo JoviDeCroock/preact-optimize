@@ -1,19 +1,10 @@
 import { withMagicString } from 'rolldown-string';
-import {
-	findStateHooks,
-	isBindablePosition,
-	isSignalHole,
-	isStaticJSX,
-	moduleScope
-} from 'preact-optimize/compiler';
+import { analyze } from 'preact-optimize/compiler';
 
 const SCRIPT_RE = /\.[cm]?(?:jsx?|tsx)$/;
 
 /** @param {string} id */
 const getLang = id => (/\.[cm]?tsx$/.test(id) ? 'tsx' : 'jsx');
-
-/** @param {any} value */
-const isNode = value => !!value && typeof value.type === 'string';
 
 /**
  * @typedef {object} Options
@@ -21,16 +12,22 @@ const isNode = value => !!value && typeof value.type === 'string';
  * @property {boolean} [hoistComponents=false] Also cache static trees that
  * contain component elements. Those components then only re-render from
  * their own state, context or signals, like `memo()` with constant props.
- * @property {boolean} [signals=true] Move JSX expressions that read `.value`
- * into their own computed so they bind to the DOM instead of re-rendering the
+ * @property {boolean} [signals=true] Move render-time `.value` reads into
+ * their own reactive scopes so they update the DOM without re-rendering the
  * component.
  * @property {boolean} [hooks=false] Back `useState`/`useReducer` state with a
- * signal when it is only read inside JSX expressions and closures, so updates
- * skip the component render. Requires `signals`.
+ * signal when every render-time read of it can move out of render, so
+ * updates skip the component render. Requires `signals`.
+ * @property {boolean} [blocks=false] Render host-only JSX trees from cloned
+ * DOM templates, patching only their dynamic parts. Requires `signals`.
  * @property {string} [runtime='preact-optimize'] Module the helpers are
  * imported from.
  * @property {RegExp} [include] Module ids to transform.
  * @property {RegExp} [exclude=/node_modules/] Module ids to skip.
+ * @property {(id: string, report: import('preact-optimize/compiler').Plan['stats'] & {
+ *   diagnostics: { line: number, column: number, reason: string }[],
+ *   keptState: { name: string, line: number, column: number, reason: string }[]
+ * }) => void} [report] Called per module with the reads that stayed in render.
  */
 
 /**
@@ -38,126 +35,193 @@ const isNode = value => !!value && typeof value.type === 'string';
  * @returns {import('rolldown').Plugin}
  */
 export default function preactOptimize(options = {}) {
-	const {
-		hoist = true,
-		hoistComponents = false,
-		signals = true,
-		hooks = false,
-		runtime = 'preact-optimize',
-		include = SCRIPT_RE,
-		exclude = /node_modules/
-	} = options;
+	const { runtime = 'preact-optimize', include = SCRIPT_RE, exclude = /node_modules/, report } = options;
 
 	const transform = withMagicString(function (s, id) {
 		const program = this.parse(s.original, { lang: getLang(id) });
-		const scope = moduleScope(program);
+		const plan = analyze(program, s.original, options);
+		if (report) {
+			report(id, {
+				...plan.stats,
+				diagnostics: plan.diagnostics.map(({ line, column, reason }) => ({ line, column, reason })),
+				keptState: plan.keptState
+			});
+		}
+		if (!plan.hoists.length && !plan.wraps.length && !plan.bindings.length && !plan.blocks.length) {
+			return;
+		}
 
+		/** Names this transform declares, which must stay distinct too. */
+		const taken = new Set();
 		/** Avoid colliding with names already in the file. */
 		const uid = (/** @type {string} */ name) => {
 			let id = '_' + name;
-			while (s.original.includes(id)) id = '_' + id;
+			while (s.original.includes(id) || taken.has(id)) id = '_' + id;
+			taken.add(id);
 			return id;
 		};
 		/** @type {Record<string, string>} */
 		const helpers = {};
-		/** @param {'static' | 'signals'} entry @param {string} name */
+		/** @param {'static' | 'signals' | 'block'} entry @param {string} name */
 		const helper = (entry, name) => (helpers[`${entry}:${name}`] ||= uid(name));
 		const cachePrefix = uid('h');
-		let caches = 0;
+		for (let i = 1; i <= plan.hoists.length; i++) taken.add(cachePrefix + i);
+		const templatePrefix = uid('t');
+		for (let i = 1; i <= plan.blocks.length; i++) taken.add(templatePrefix + i);
 
-		/** Identifiers the hooks transform turned into signal reads. */
-		const reactive = new Set();
-		if (signals && hooks) {
-			for (const { declarator, hook, name, references } of findStateHooks(
-				program,
-				scope
-			)) {
-				const signal = uid(name);
-				const state = declarator.id.elements[0];
-				s.update(state.start, state.end, signal);
-				const callee = declarator.init.callee;
-				s.update(callee.start, callee.end, helper('signals', '$' + hook));
-				for (const { node, shorthand } of references) {
-					reactive.add(node);
-					s.update(
-						node.start,
-						node.end,
-						shorthand ? `${name}: ${signal}.value` : `${signal}.value`
-					);
-				}
+		// One key per reusable scope, so its computed survives re-renders.
+		const reusable = plan.wraps.filter(wrap => wrap.deps);
+		const sites = reusable.length ? uid('k') : '';
+		const sitesInit = sites && `var ${sites} = ${helper('signals', '$sites')}(${reusable.length});\n`;
+
+		/** @type {Map<import('preact-optimize/compiler').Binding, string>} */
+		const targets = new Map();
+		for (const binding of plan.bindings) {
+			const target = uid(binding.name);
+			const id =
+				binding.kind === 'useState' || binding.kind === 'useReducer'
+					? binding.declarator.id.elements[0]
+					: binding.declarator.id;
+			s.update(id.start, id.end, target);
+			targets.set(binding, target);
+			if (binding.kind !== 'derived') {
+				const callee = binding.call.callee;
+				s.update(callee.start, callee.end, helper('signals', '$' + binding.kind));
+			}
+			for (const { node, shorthand } of binding.references) {
+				s.update(node.start, node.end, shorthand ? `${binding.name}: ${target}.value` : `${target}.value`);
 			}
 		}
-		const isReactive = (/** @type {any} */ node) => reactive.has(node);
 
-		const openingOf = new WeakMap();
-
-		// Pre-order walk: outer nodes are edited before inner ones. Openers
-		// stack with `appendRight` and closers with `prependLeft` so nested
-		// wrappers that share a boundary nest correctly.
-		/** @param {any} node @param {any} parent @param {number} fnDepth */
-		const visit = (node, parent, fnDepth) => {
-			if (
-				hoist &&
-				fnDepth > 0 &&
-				(node.type === 'JSXElement' || node.type === 'JSXFragment') &&
-				isStaticJSX(node, { hoistComponents, scope })
-			) {
-				const cache = `${cachePrefix}${++caches}`;
-				const container =
-					parent.type === 'JSXElement' ||
-					parent.type === 'JSXFragment' ||
-					parent.type === 'JSXAttribute';
-				s.appendRight(
-					node.start,
-					`${container ? '{' : ''}(${cache} || (${cache} = ${helper('static', '$static')}(`
-				);
-				s.prependLeft(node.end, `)))${container ? '}' : ''}`);
-				return;
+		for (const { node, keep, call, kind, sources } of plan.deps) {
+			const slice = (/** @type {any} */ el) => s.original.slice(el.start, el.end);
+			let text = `[${keep.map(slice).join(', ')}]`;
+			if (kind === 'useEffect' || kind === 'useLayoutEffect') {
+				s.update(call.callee.start, call.callee.end, helper('signals', '$' + kind));
 			}
-
-			if (
-				signals &&
-				node.type === 'JSXExpressionContainer' &&
-				isBindablePosition(parent, openingOf.get(parent)) &&
-				isSignalHole(node.expression, isReactive)
-			) {
-				s.appendRight(node.expression.start, `${helper('signals', '$hole')}(() => (`);
-				s.prependLeft(node.expression.end, '))');
-				fnDepth++;
+			if (kind !== 'useCallback') {
+				text += `, [${sources.map(source => ('binding' in source ? targets.get(source.binding) : slice(source.node))).join(', ')}]`;
 			}
+			s.update(node.start, node.end, text);
+		}
 
-			if (/Function/.test(node.type)) fnDepth++;
-			// ESTree has no parent pointers; attributes need their tag name.
-			if (node.type === 'JSXOpeningElement') {
-				for (const attr of node.attributes) openingOf.set(attr, node);
-			}
-
-			for (const key in node) {
-				const value = node[key];
-				if (Array.isArray(value)) {
-					for (const child of value) {
-						if (isNode(child)) visit(child, node, fnDepth);
-					}
-				} else if (isNode(value)) {
-					visit(value, node, fnDepth);
+		/** @param {import('preact-optimize/compiler').Binding[]} bindings */
+		const snapshot = bindings =>
+			`const ${bindings.map(binding => `${binding.name} = ${targets.get(binding)}.value`).join(', ')};`;
+		/** @type {{ node: any, open: string, close: string }[]} */
+		const bodies = [];
+		for (const { fn, bindings } of plan.snapshots) {
+			const body = fn.body;
+			if (body.type === 'BlockStatement') {
+				// After any directive prologue.
+				let at = body.start + 1;
+				for (const stmt of body.body) {
+					if (stmt.type !== 'ExpressionStatement' || !stmt.directive) break;
+					at = stmt.end;
 				}
+				s.appendLeft(at, ` ${snapshot(bindings)}`);
+			} else {
+				// Oxc drops parentheses, so start the block right after `=>`.
+				const start = s.original.lastIndexOf('=>', body.start) + 2;
+				bodies.push({
+					node: { start, end: fn.end },
+					open: ` { ${snapshot(bindings)} return (`,
+					close: '); }'
+				});
 			}
-		};
-		visit(program, null, 0);
+		}
 
-		const keys = Object.keys(helpers);
-		if (!keys.length) return;
+		// Openers stack with `appendRight` and closers with `prependLeft`, so
+		// applying outer edits first nests wrappers that share a boundary;
+		// a function body is outside anything that wraps the same expression.
+		const edits = [
+			...bodies,
+			...plan.hoists.map((hoist, i) => {
+				const cache = `${cachePrefix}${i + 1}`;
+				const container =
+					hoist.parent.type === 'JSXElement' ||
+					hoist.parent.type === 'JSXFragment' ||
+					hoist.parent.type === 'JSXAttribute';
+				return {
+					node: hoist.node,
+					open: `${container ? '{' : ''}(${cache} || (${cache} = ${helper('static', '$static')}(`,
+					close: `)))${container ? '}' : ''}`
+				};
+			}),
+			...plan.wraps.map(wrap => ({
+				node: wrap.node,
+				open: `${wrap.kind === 'element' ? '{' : ''}${helper(
+					'signals',
+					wrap.kind === 'derived' ? '$derive' : '$hole'
+				)}(() => (`,
+				close: `)${
+					wrap.deps
+						? `, [${wrap.deps.map(dep => (dep.binding ? targets.get(dep.binding) : dep.name)).join(', ')}], ${sites}[${reusable.indexOf(wrap)}]`
+						: ''
+				})${wrap.kind === 'element' ? '}' : ''}`
+			}))
+		].sort((a, b) => a.node.start - b.node.start || b.node.end - a.node.end);
+
+		for (const edit of edits) {
+			s.appendRight(edit.node.start, edit.open);
+			s.prependLeft(edit.node.end, edit.close);
+		}
+
+		// Blocks last: their text between slots is overwritten, keeping what
+		// other edits added at the root's edges and inside slots.
+		/** @type {string[]} */
+		const templates = [];
+		for (const [index, block] of plan.blocks.entries()) {
+			const root = block.node;
+			const name = templatePrefix + (index + 1);
+			const keyAttr = root.openingElement.attributes.find((/** @type {any} */ attr) => attr.name.name === 'key');
+			const key = block.keyNode ? s.slice(block.keyNode.start, block.keyNode.end) : null;
+			// Template: the original JSX with `s[i]` in each slot, without the key.
+			const cuts = block.slots.map((slot, i) => ({
+				start: slot.node.start,
+				end: slot.node.end,
+				text: `s[${i}]`
+			}));
+			if (keyAttr) cuts.push({ start: keyAttr.start, end: keyAttr.end, text: '' });
+			cuts.sort((a, b) => a.start - b.start);
+			let template = '';
+			let pos = root.start;
+			for (const cut of cuts) {
+				template += s.original.slice(pos, cut.start) + cut.text;
+				pos = cut.end;
+			}
+			template += s.original.slice(pos, root.end);
+			const reactive = block.slots.flatMap((slot, i) => (slot.reactive ? [i] : []));
+			// Unused components can drop their templates.
+			templates.push(
+				`var ${name} = /* @__PURE__ */ ${helper('block', '$template')}(s => ${template}, [${reactive.join(', ')}]);\n`
+			);
+
+			const container =
+				block.parent.type === 'JSXElement' ||
+				block.parent.type === 'JSXFragment' ||
+				block.parent.type === 'JSXAttribute';
+			let text = `${container ? '{' : ''}${helper('block', '$block')}([${name}`;
+			pos = root.start;
+			for (const slot of block.slots) {
+				text += slot.reactive ? ', () => (' : ', ';
+				s.overwrite(pos, slot.node.start, text, { contentOnly: true });
+				text = slot.reactive ? ')' : '';
+				pos = slot.node.end;
+			}
+			text += `]${key ? `, ${key}` : ''})${container ? '}' : ''}`;
+			s.overwrite(pos, root.end, text, { contentOnly: true });
+		}
 
 		let header = '';
-		for (const key of keys) {
+		for (const key of Object.keys(helpers)) {
 			const [entry, name] = key.split(':');
 			header += `import { ${name} as ${helpers[key]} } from ${JSON.stringify(`${runtime}/${entry}`)};\n`;
 		}
-		if (caches) {
-			const vars = [];
-			for (let i = 1; i <= caches; i++) vars.push(cachePrefix + i);
-			header += `var ${vars.join(', ')};\n`;
+		if (plan.hoists.length) {
+			header += `var ${plan.hoists.map((_, i) => cachePrefix + (i + 1)).join(', ')};\n`;
 		}
+		header += sitesInit + templates.join('');
 
 		// Keep directives ("use client") and hashbangs first.
 		let at = program.hashbang ? program.hashbang.end : 0;
