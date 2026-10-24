@@ -1,6 +1,6 @@
 {
   "name": "preact-optimize",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "description": "Runtime helpers for babel-plugin-preact-optimize and rolldown-plugin-preact-optimize.",
   "type": "module",
   "exports": {

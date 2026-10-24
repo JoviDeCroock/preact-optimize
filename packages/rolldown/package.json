@@ -1,6 +1,6 @@
 {
   "name": "rolldown-plugin-preact-optimize",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "description": "Rolldown/Vite plugin that hoists static JSX and binds signal reads directly to the DOM in Preact.",
   "type": "module",
   "main": "./src/index.js",
