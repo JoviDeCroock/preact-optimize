@@ -166,7 +166,9 @@ function declarationOf(stmt) {
  * @property {Set<string>} written Names assigned or updated anywhere in the
  * file, at any depth.
  * @property {Set<string>} mutated Names whose properties are assigned,
- * updated or deleted anywhere in the file.
+ * updated or deleted anywhere in the file. A `.value` write is taken to be a
+ * signal write, which holes follow anyway, unless the name is also declared
+ * with a value that could be a fresh object each render (see `isFreshInit`).
  */
 
 /**
@@ -181,6 +183,10 @@ export function moduleScope(program) {
 	const written = new Set();
 	/** @type {Set<string>} */
 	const mutated = new Set();
+	/** Roots of `x.value = ...` writes. */
+	const valueWritten = new Set();
+	/** Names some declaration initializes with a fresh object. */
+	const fresh = new Set();
 
 	for (const raw of program.body) {
 		const stmt = declarationOf(raw);
@@ -221,11 +227,13 @@ export function moduleScope(program) {
 	/**
 	 * `o.a.b = x` changes what a later read of `o` sees.
 	 * @param {any} node
+	 * @param {boolean} [isDelete]
 	 */
-	const writeRoot = node => {
+	const writeRoot = (node, isDelete = false) => {
 		if (!isMemberLike(node)) return;
+		const into = isValueRead(node) && !isDelete ? valueWritten : mutated;
 		while (isMemberLike(node)) node = node.object;
-		if (node.type === 'Identifier') mutated.add(node.name);
+		if (node.type === 'Identifier') into.add(node.name);
 	};
 
 	/** @param {any} node @param {boolean} isTop */
@@ -234,6 +242,9 @@ export function moduleScope(program) {
 			case 'VariableDeclaration':
 				if (!isTop) {
 					for (const decl of node.declarations) patternNames(decl.id, unsafe);
+				}
+				for (const decl of node.declarations) {
+					if (decl.init && isFreshInit(decl.init)) patternNames(decl.id, fresh);
 				}
 				break;
 			case 'FunctionDeclaration':
@@ -258,7 +269,7 @@ export function moduleScope(program) {
 				writeRoot(node.argument);
 				break;
 			case 'UnaryExpression':
-				if (node.operator === 'delete') writeRoot(node.argument);
+				if (node.operator === 'delete') writeRoot(node.argument, true);
 				break;
 			case 'ForInStatement':
 			case 'ForOfStatement':
@@ -276,7 +287,23 @@ export function moduleScope(program) {
 	for (const stmt of program.body) visit(declarationOf(stmt), true);
 
 	for (const name of unsafe) bindings.delete(name);
+	for (const name of valueWritten) if (fresh.has(name)) mutated.add(name);
 	return { bindings, written, mutated };
+}
+
+/**
+ * Whether a declaration's value could be a new object every time it runs,
+ * so that writing its `.value` is a mutation rather than a signal write.
+ * Hook results (`useSignal`, models), `signal()`/`computed()` and aliases of
+ * other bindings live as long as what they came from.
+ * @param {any} init
+ */
+function isFreshInit(init) {
+	init = unwrap(init);
+	if (init.type === 'Identifier' || isMemberLike(init)) return false;
+	if (!isCall(init)) return true;
+	const name = calleeName(init);
+	return !HOOK_NAME.test(name) && name !== 'signal' && name !== 'computed';
 }
 
 /**
